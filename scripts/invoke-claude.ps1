@@ -14,13 +14,14 @@ param(
     [Parameter()][ValidateRange(5, 600)][int] $GitCommandTimeoutSeconds = 60,
     [Parameter()][ValidateRange(0, 20)][int] $UnifiedContext = 3,
     [Parameter()][ValidateNotNullOrEmpty()][string] $ClaudePath,
+    [Parameter()][ValidateNotNullOrEmpty()][string] $RunDirectory,
     [Parameter()][switch] $RawJson,
     [Parameter()][switch] $DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$wrapperVersion = '7.0.0'
+$wrapperVersion = '7.1.0'
 $maximumPromptBytes = 256KB
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 $gitCommandTimeoutMilliseconds = $GitCommandTimeoutSeconds * 1000
@@ -143,6 +144,73 @@ function Format-MetadataLine {
     return 'CLAUDE_DELEGATION_METADATA=' + ($Metadata | ConvertTo-Json -Depth 20 -Compress)
 }
 
+function Write-AtomicUtf8Text {
+    param([Parameter(Mandatory = $true)][string] $Path, [AllowEmptyString()][string] $Text)
+    $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
+    [IO.Directory]::CreateDirectory($parent) | Out-Null
+    $temporaryPath = Join-Path $parent ('.' + [IO.Path]::GetFileName($Path) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($temporaryPath, $Text, $script:utf8NoBom)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $backupPath = Join-Path $parent ('.' + [IO.Path]::GetFileName($Path) + '.' + [Guid]::NewGuid().ToString('N') + '.bak')
+            try { [IO.File]::Replace($temporaryPath, $Path, $backupPath) }
+            finally { if (Test-Path -LiteralPath $backupPath -PathType Leaf) { Remove-Item -LiteralPath $backupPath -Force } }
+        }
+        else {
+            [IO.File]::Move($temporaryPath, $Path)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force }
+    }
+}
+
+function Write-RunJson {
+    param([AllowNull()][string] $Directory, [string] $Name, [AllowNull()][object] $Value)
+    if (-not $Directory) { return }
+    Write-AtomicUtf8Text (Join-Path $Directory $Name) ($Value | ConvertTo-Json -Depth 100)
+}
+
+function Write-RunStatus {
+    param(
+        [AllowNull()][string] $Directory,
+        [string] $RunId,
+        [string] $Status,
+        [bool] $ClaudeStartAttempted,
+        [bool] $ClaudeStarted,
+        [AllowNull()][object] $ProcessId,
+        [AllowNull()][object] $CompletedAtUtc,
+        [AllowNull()][object] $ErrorMessage
+    )
+    if (-not $Directory) { return }
+    Write-RunJson $Directory 'status.json' ([ordered]@{
+        schema_version=1; run_id=$RunId; wrapper_version=$script:wrapperVersion; status=$Status
+        terminal=($null -ne $CompletedAtUtc)
+        claude_start_attempted=$ClaudeStartAttempted; claude_started=$ClaudeStarted; process_id=$ProcessId
+        started_at_utc=$script:runStartedAtUtc; completed_at_utc=$CompletedAtUtc
+        prompt_sha256=$script:promptSha256; error=$ErrorMessage
+        stream_file='stream.jsonl'; stderr_file='stderr.log'; result_file='result.json'; metadata_file='metadata.json'
+    })
+}
+
+function Complete-DurableRun {
+    param(
+        [AllowNull()][string] $Directory,
+        [string] $RunId,
+        [System.Collections.IDictionary] $Metadata,
+        [AllowNull()][object] $Review,
+        [AllowNull()][object] $ErrorMessage,
+        [bool] $ReviewComplete
+    )
+    if (-not $Directory) { return }
+    Write-RunJson $Directory 'metadata.json' $Metadata
+    Write-RunJson $Directory 'result.json' ([ordered]@{
+        schema_version=1; run_id=$RunId; status=$Metadata.status; terminal=$true; review_complete=$ReviewComplete
+        review=$Review; error=$ErrorMessage; metadata_file='metadata.json'; stream_file='stream.jsonl'; stderr_file='stderr.log'
+    })
+    Write-RunStatus $Directory $RunId $Metadata.status ([bool]$Metadata.claude_start_attempted) ([bool]$Metadata.claude_started) $Metadata.claude_process_id $Metadata.completed_at_utc $ErrorMessage
+}
+
 function ConvertTo-WindowsCommandLineArgument {
     param([AllowEmptyString()][string] $Value)
     if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
@@ -169,7 +237,10 @@ function Invoke-ClaudeProcess {
     param(
         [string] $ExecutablePath, [string[]] $Arguments, [string] $StandardInput,
         [string] $ProcessWorkingDirectory, [System.Collections.IDictionary] $EnvironmentOverrides,
-        [int] $TimeoutMilliseconds
+        [int] $TimeoutMilliseconds,
+        [AllowNull()][string] $StdoutPath,
+        [AllowNull()][string] $StderrPath,
+        [AllowNull()][scriptblock] $OnStarted
     )
     $extension = [IO.Path]::GetExtension($ExecutablePath)
     if ($extension -ieq '.ps1') {
@@ -196,10 +267,21 @@ function Invoke-ClaudeProcess {
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
     $clock = [Diagnostics.Stopwatch]::StartNew()
+    $stdoutFile = $null
+    $stderrFile = $null
     try {
         if (-not $process.Start()) { throw 'Claude Code process did not start.' }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if ($OnStarted) { & $OnStarted $process.Id }
+        if ($StdoutPath) {
+            $stdoutFile = New-Object IO.FileStream($StdoutPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read, 1, [IO.FileOptions]::WriteThrough)
+            $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutFile)
+        }
+        else { $stdoutTask = $process.StandardOutput.ReadToEndAsync() }
+        if ($StderrPath) {
+            $stderrFile = New-Object IO.FileStream($StderrPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read, 1, [IO.FileOptions]::WriteThrough)
+            $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderrFile)
+        }
+        else { $stderrTask = $process.StandardError.ReadToEndAsync() }
         $inputBytes = $utf8NoBom.GetBytes($StandardInput)
         $inputTask = $process.StandardInput.BaseStream.WriteAsync($inputBytes, 0, $inputBytes.Length)
         $inputTimedOut = $false
@@ -226,8 +308,12 @@ function Invoke-ClaudeProcess {
             try { $process.Kill() } catch {}
             [void]$process.WaitForExit(5000)
         }
-        $stdout = if ($stdoutTask.Wait(5000)) { $stdoutTask.GetAwaiter().GetResult() } else { '' }
-        $stderr = if ($stderrTask.Wait(5000)) { $stderrTask.GetAwaiter().GetResult() } else { 'Claude stderr remained open after process termination.' }
+        $stdoutCompleted = $stdoutTask.Wait(5000)
+        $stderrCompleted = $stderrTask.Wait(5000)
+        if ($stdoutFile) { $stdoutFile.Flush(); $stdoutFile.Dispose(); $stdoutFile = $null }
+        if ($stderrFile) { $stderrFile.Flush(); $stderrFile.Dispose(); $stderrFile = $null }
+        $stdout = if ($StdoutPath -and (Test-Path -LiteralPath $StdoutPath -PathType Leaf)) { [IO.File]::ReadAllText($StdoutPath, $utf8NoBom) } elseif ($stdoutCompleted) { $stdoutTask.GetAwaiter().GetResult() } else { '' }
+        $stderr = if ($StderrPath -and (Test-Path -LiteralPath $StderrPath -PathType Leaf)) { [IO.File]::ReadAllText($StderrPath, $utf8NoBom) } elseif ($stderrCompleted) { $stderrTask.GetAwaiter().GetResult() } else { 'Claude stderr remained open after process termination.' }
         if ($stdinError) { $stderr = (($stderr.TrimEnd("`r", "`n"), "Claude stdin write failed: $stdinError") | Where-Object { $_ }) -join [Environment]::NewLine }
         return [pscustomobject]@{
             ExitCode = if ($timedOut) { -1 } else { $process.ExitCode }
@@ -236,7 +322,11 @@ function Invoke-ClaudeProcess {
             Stderr = $stderr
         }
     }
-    finally { $clock.Stop(); $process.Dispose() }
+    finally {
+        if ($stdoutFile) { $stdoutFile.Dispose() }
+        if ($stderrFile) { $stderrFile.Dispose() }
+        $clock.Stop(); $process.Dispose()
+    }
 }
 
 function Get-ClaudeAuthInfo {
@@ -402,6 +492,23 @@ function Add-ResponseMetadata {
     }
 }
 
+$runId = [Guid]::NewGuid().ToString('N')
+$runStartedAtUtc = [DateTime]::UtcNow.ToString('o')
+$promptSha256 = Get-Utf8Sha256 $Prompt
+$resolvedRunDirectory = $null
+if ($RunDirectory) {
+    $resolvedRunDirectory = [IO.Path]::GetFullPath($RunDirectory)
+    if (Test-Path -LiteralPath $resolvedRunDirectory) {
+        if (-not (Test-Path -LiteralPath $resolvedRunDirectory -PathType Container)) { throw "RunDirectory is not a directory: $resolvedRunDirectory" }
+        if (@(Get-ChildItem -LiteralPath $resolvedRunDirectory -Force).Count) { throw "RunDirectory must be new or empty: $resolvedRunDirectory" }
+    }
+    else { [IO.Directory]::CreateDirectory($resolvedRunDirectory) | Out-Null }
+    Write-AtomicUtf8Text (Join-Path $resolvedRunDirectory 'stream.jsonl') ''
+    Write-AtomicUtf8Text (Join-Path $resolvedRunDirectory 'stderr.log') ''
+    Write-RunStatus $resolvedRunDirectory $runId 'preflight' $false $false $null $null $null
+    if (-not $RawJson) { "CLAUDE_DELEGATION_RUN_DIRECTORY=$resolvedRunDirectory" }
+}
+
 $resolvedWorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
 if (-not (Test-Path -LiteralPath $resolvedWorkingDirectory -PathType Container)) { throw "Working directory is not a directory: $WorkingDirectory" }
 $promptBytes = [Text.Encoding]::UTF8.GetByteCount($Prompt)
@@ -466,8 +573,15 @@ if ($BaseRevision -or $ReviewWorkingTree) {
         foreach ($path in @(Split-GitNullList $names)) { [void]$changedPaths.Add($path) }
     }
     if (-not $diffText -and -not $changedPaths.Count) {
+        $noChangesMetadata = [ordered]@{
+            schema_version=3; wrapper_version=$wrapperVersion; run_id=$runId; run_directory=$resolvedRunDirectory
+            started_at_utc=$runStartedAtUtc; completed_at_utc=[DateTime]::UtcNow.ToString('o'); status='no_changes'
+            review_scope=$reviewScope; claude_start_attempted=$false; claude_started=$false; claude_process_id=$null
+            prompt_sha256=$promptSha256; prompt_bytes=$promptBytes
+        }
+        Complete-DurableRun $resolvedRunDirectory $runId $noChangesMetadata $null $null $true
         'No changes found in the requested review scope.'
-        'CLAUDE_DELEGATION_METADATA=' + ([ordered]@{schema_version=2;wrapper_version=$wrapperVersion;status='no_changes';review_scope=$reviewScope;claude_started=$false} | ConvertTo-Json -Compress)
+        Format-MetadataLine $noChangesMetadata
         return
     }
     $diffBytes=[Text.Encoding]::UTF8.GetByteCount($diffText)
@@ -561,7 +675,8 @@ $toolAllowlist=if($nativeCodeReview){@('Read','Glob','Grep','Task','Agent','Repo
 $disallowedTools=@('Bash','PowerShell','Edit','Write','NotebookEdit','WebFetch','WebSearch')
 
 $metadata=[ordered]@{
-    schema_version=2;wrapper_version=$wrapperVersion;completed_at_utc=$null;status='preflight';claude_started=$false
+    schema_version=3;wrapper_version=$wrapperVersion;run_id=$runId;run_directory=$resolvedRunDirectory;started_at_utc=$runStartedAtUtc;completed_at_utc=$null;status='preflight'
+    claude_start_attempted=$false;claude_started=$false;claude_process_id=$null;prompt_sha256=$promptSha256
     claude_cli_version=$versionResult.Stdout.Trim();review_scope=$reviewScope;working_directory=$resolvedWorkingDirectory;repository_root=$repositoryRoot
     repository_head=$repositoryHead;base_revision=$resolvedBaseRevision;head_revision=$resolvedHeadRevision;input_transport=$inputTransport;native_code_review=$nativeCodeReview;native_review_target=$nativeTarget
     tools=if($nativeCodeReview){@('Read','Glob','Grep')}else{'none'};disallowed_tools=if($nativeCodeReview){@($disallowedTools)}else{'none'};safe_mode=$true;setting_sources='none';auto_memory='disabled';strict_mcp_config=$true
@@ -578,7 +693,7 @@ $metadata=[ordered]@{
     usage_source=$null;input_tokens=$null;output_tokens=$null;cache_creation_input_tokens=$null;cache_read_input_tokens=$null;model_usage_cost_usd=$null;model_usage=@()
     tool_call_count=0;tool_usage=[ordered]@{};inspected_paths=@();unexpected_tool_calls=@();unexpected_tool_policy=if($nativeCodeReview){'diagnostic_cli_enforced'}else{'fatal'};metadata_collection_error=$null
     output_format='stream-json';response_protocol=if($nativeCodeReview){'claude-native-code-review-v1'}else{'findings-first-completion-v3'};completion_marker=$null;native_review_completed=$false;overflow_reported=$false
-    invalid_stream_line_count=0;partial_output_recovered=$false;recovered_output_chars=0
+    invalid_stream_line_count=0;partial_output_recovered=$false;recovered_output_chars=0;durable_artifact_error=$null
 }
 
 $arguments=[Collections.Generic.List[string]]::new()
@@ -590,20 +705,41 @@ if($budgetApplied){$arguments.Add('--max-budget-usd');$arguments.Add($budgetText
 if($DryRun){
     $metadata.status='dry_run';$metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o')
     if($sandboxPrepared){try{Remove-ReviewSandbox $gitPath $repositoryRoot $sandboxRoot $snapshotRoot;$metadata.sandbox_cleanup_succeeded=$true}catch{$metadata.sandbox_cleanup_succeeded=$false;$metadata.sandbox_cleanup_error=$_.Exception.Message}}
+    Complete-DurableRun $resolvedRunDirectory $runId $metadata $null $null $false
     [pscustomobject]@{ClaudePath=$resolvedClaudePath;Arguments=@($arguments);Prompt=$effectivePrompt;Metadata=$metadata};return
 }
 
 $processWorkingDirectory=if($nativeCodeReview){$snapshotRoot}elseif($reviewScope -eq 'bounded-analysis'){[IO.Path]::GetTempPath()}else{$sandboxRoot}
+$streamPath=if($resolvedRunDirectory){Join-Path $resolvedRunDirectory 'stream.jsonl'}else{$null}
+$stderrPath=if($resolvedRunDirectory){Join-Path $resolvedRunDirectory 'stderr.log'}else{$null}
 $stopwatch=[Diagnostics.Stopwatch]::StartNew()
-try{
+$processError=$null
+$onClaudeStarted = {
+    param($startedProcessId)
     $metadata.claude_started=$true
-    $processResult=Invoke-ClaudeProcess $resolvedClaudePath @($arguments) $effectivePrompt $processWorkingDirectory ([ordered]@{CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION='false';CLAUDE_CODE_MAX_RETRIES='0';CLAUDE_CODE_DISABLE_AUTO_MEMORY='1';ENABLE_TOOL_SEARCH='false'}) ($MaxRuntimeMinutes*60*1000)
+    $metadata.claude_process_id=$startedProcessId
+    $metadata.status='running'
+    try { Write-RunStatus $resolvedRunDirectory $runId 'running' $true $true $startedProcessId $null $null }
+    catch { $metadata.durable_artifact_error=$_.Exception.GetBaseException().Message }
 }
+try{
+    $metadata.claude_start_attempted=$true
+    $metadata.status='starting'
+    Write-RunStatus $resolvedRunDirectory $runId 'starting' $true $false $null $null $null
+    $processResult=Invoke-ClaudeProcess $resolvedClaudePath @($arguments) $effectivePrompt $processWorkingDirectory ([ordered]@{CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION='false';CLAUDE_CODE_MAX_RETRIES='0';CLAUDE_CODE_DISABLE_AUTO_MEMORY='1';ENABLE_TOOL_SEARCH='false'}) ($MaxRuntimeMinutes*60*1000) $streamPath $stderrPath $onClaudeStarted
+}
+catch{$processError=$_.Exception}
 finally{
     $stopwatch.Stop()
     if($sandboxPrepared){try{Remove-ReviewSandbox $gitPath $repositoryRoot $sandboxRoot $snapshotRoot;$metadata.sandbox_cleanup_succeeded=$true}catch{$metadata.sandbox_cleanup_succeeded=$false;$metadata.sandbox_cleanup_error=$_.Exception.Message}}
 }
-$metadata.elapsed_ms=$stopwatch.ElapsedMilliseconds;$metadata.exit_code=$processResult.ExitCode;$metadata.timed_out=$processResult.TimedOut;$metadata.stderr_chars=$processResult.Stderr.Length;$metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o')
+$metadata.elapsed_ms=$stopwatch.ElapsedMilliseconds;$metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o')
+if($processError){
+    $metadata.status='wrapper_process_error'
+    Complete-DurableRun $resolvedRunDirectory $runId $metadata $null $processError.Message $false
+    throw "Claude process orchestration failed. $($processError.Message)`n$(Format-MetadataLine $metadata)"
+}
+$metadata.exit_code=$processResult.ExitCode;$metadata.timed_out=$processResult.TimedOut;$metadata.stderr_chars=$processResult.Stderr.Length
 
 $streamLines=@($processResult.Stdout -split "`r?`n");$response=$null;$assistantText='';$partialText=[Text.StringBuilder]::new();$invalid=[Collections.Generic.List[string]]::new()
 $toolCounts=[ordered]@{};$inspected=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase);$unexpected=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -625,17 +761,19 @@ foreach($line in $streamLines){
 }
 $metadata.invalid_stream_line_count=$invalid.Count;$metadata.tool_usage=$toolCounts;$metadata.tool_call_count=[int](($toolCounts.Values|Measure-Object -Sum).Sum);$metadata.inspected_paths=@($inspected|Sort-Object);$metadata.unexpected_tool_calls=@($unexpected|Sort-Object)
 $recoveredText=if($assistantText){$assistantText}else{$partialText.ToString()};$metadata.recovered_output_chars=$recoveredText.Length
-if($processResult.TimedOut){$metadata.status='error_timeout';$metadata.partial_output_recovered=[bool]$recoveredText;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "Claude review exceeded $MaxRuntimeMinutes minutes.$partial`n$(Format-MetadataLine $metadata)"}
-if($null -eq $response){$metadata.status='missing_result_event';$metadata.partial_output_recovered=[bool]$recoveredText;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};$stderr=if($processResult.Stderr){"`n<claude_stderr>`n$($processResult.Stderr.Trim())`n</claude_stderr>"}else{''};throw "Claude returned no terminal result.$partial$stderr`n$(Format-MetadataLine $metadata)"}
+if($processResult.TimedOut){$metadata.status='error_timeout';$metadata.partial_output_recovered=[bool]$recoveredText;$message="Claude review exceeded $MaxRuntimeMinutes minutes.";Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
+if($null -eq $response){$metadata.status='missing_result_event';$metadata.partial_output_recovered=[bool]$recoveredText;$message='Claude returned no terminal result.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};$stderr=if($processResult.Stderr){"`n<claude_stderr>`n$($processResult.Stderr.Trim())`n</claude_stderr>"}else{''};throw "$message$partial$stderr`n$(Format-MetadataLine $metadata)"}
 try{Add-ResponseMetadata $metadata $response}catch{$metadata.metadata_collection_error=$_.Exception.Message}
 $isError=Get-PropertyValue $response 'is_error';$subtype=Get-PropertyValue $response 'subtype'
-if($processResult.ExitCode -ne 0 -or $isError -eq $true -or ($subtype -is [string] -and $subtype.StartsWith('error_',[StringComparison]::OrdinalIgnoreCase))){$base=if($subtype){$subtype}else{'claude_error'};$metadata.partial_output_recovered=[bool]$recoveredText;$metadata.status=if($recoveredText){"partial_$base"}else{$base};$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "Claude review did not complete.$partial`n$(Format-MetadataLine $metadata)"}
-if($unexpected.Count -and -not $nativeCodeReview){$metadata.status='security_boundary_violation';throw "Claude reported a tool outside the allowlist: $(@($unexpected)-join ', ').`n$(Format-MetadataLine $metadata)"}
+if($processResult.ExitCode -ne 0 -or $isError -eq $true -or ($subtype -is [string] -and $subtype.StartsWith('error_',[StringComparison]::OrdinalIgnoreCase))){$base=if($subtype){$subtype}else{'claude_error'};$metadata.partial_output_recovered=[bool]$recoveredText;$metadata.status=if($recoveredText){"partial_$base"}else{$base};$message='Claude review did not complete.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
+if($unexpected.Count -and -not $nativeCodeReview){$metadata.status='security_boundary_violation';$message="Claude reported a tool outside the allowlist: $(@($unexpected)-join ', ').";Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;throw "$message`n$(Format-MetadataLine $metadata)"}
 $result=Get-PropertyValue $response 'result';if($null -eq $result -and $recoveredText){$result=$recoveredText};if($null -eq $result){$result=Get-PropertyValue $response 'structured_output'}
-if($null -eq $result){$metadata.status='missing_result';throw "Claude returned no result.`n$(Format-MetadataLine $metadata)"}
+if($null -eq $result){$metadata.status='missing_result';$message='Claude returned no result.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;throw "$message`n$(Format-MetadataLine $metadata)"}
 $protocol=if($result -is [string]){$result}else{$recoveredText}
-if($nativeCodeReview){if([string]::IsNullOrWhiteSpace([string]$protocol)){$metadata.status='native_review_empty';throw "Claude native code review returned no findings result.`n$(Format-MetadataLine $metadata)"};$metadata.native_review_completed=$true;$metadata.status='success_native_review'}
-elseif($protocol -match '(?m)^MORE_FINDINGS_REMAIN\s*$'){$metadata.completion_marker='MORE_FINDINGS_REMAIN';$metadata.overflow_reported=$true;$metadata.status='success_with_overflow'}elseif($protocol -match '(?m)^REVIEW_COMPLETE\s*$'){$metadata.completion_marker='REVIEW_COMPLETE';$metadata.status='success'}else{$metadata.status='protocol_incomplete';$metadata.partial_output_recovered=[bool]$protocol;$partial=if($protocol){"`n<incomplete_claude_review>`n$protocol`n</incomplete_claude_review>"}else{''};throw "Claude returned without a completion marker.$partial`n$(Format-MetadataLine $metadata)"}
+if($nativeCodeReview){if([string]::IsNullOrWhiteSpace([string]$protocol)){$metadata.status='native_review_empty';$message='Claude native code review returned no findings result.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;throw "$message`n$(Format-MetadataLine $metadata)"};$metadata.native_review_completed=$true;$metadata.status='success_native_review'}
+elseif($protocol -match '(?m)^MORE_FINDINGS_REMAIN\s*$'){$metadata.completion_marker='MORE_FINDINGS_REMAIN';$metadata.overflow_reported=$true;$metadata.status='success_with_overflow'}elseif($protocol -match '(?m)^REVIEW_COMPLETE\s*$'){$metadata.completion_marker='REVIEW_COMPLETE';$metadata.status='success'}else{$metadata.status='protocol_incomplete';$metadata.partial_output_recovered=[bool]$protocol;$message='Claude returned without a completion marker.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $protocol $message $false;$partial=if($protocol){"`n<incomplete_claude_review>`n$protocol`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
+$reviewComplete = $metadata.status -ne 'success_with_overflow'
+Complete-DurableRun $resolvedRunDirectory $runId $metadata $result $null $reviewComplete
 if($RawJson){[ordered]@{claude=$response;recovered_review=$result;delegation_metadata=$metadata}|ConvertTo-Json -Depth 100 -Compress;return}
 if($result -is [string]){$result}else{$result|ConvertTo-Json -Depth 100}
 "`n$(Format-MetadataLine $metadata)"
