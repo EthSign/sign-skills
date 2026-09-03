@@ -21,7 +21,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$wrapperVersion = '7.1.0'
+$wrapperVersion = '7.1.23'
 $maximumPromptBytes = 256KB
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 $gitCommandTimeoutMilliseconds = $GitCommandTimeoutSeconds * 1000
@@ -308,15 +308,18 @@ function Invoke-ClaudeProcess {
             try { $process.Kill() } catch {}
             [void]$process.WaitForExit(5000)
         }
-        $stdoutCompleted = $stdoutTask.Wait(5000)
-        $stderrCompleted = $stderrTask.Wait(5000)
+        $stdoutDrainError=$null;$stderrDrainError=$null
+        try{$stdoutCompleted=$stdoutTask.Wait(5000)}catch{$stdoutCompleted=$false;$stdoutDrainError=$_.Exception.GetBaseException().Message}
+        try{$stderrCompleted=$stderrTask.Wait(5000)}catch{$stderrCompleted=$false;$stderrDrainError=$_.Exception.GetBaseException().Message}
         if ($stdoutFile) { $stdoutFile.Flush(); $stdoutFile.Dispose(); $stdoutFile = $null }
         if ($stderrFile) { $stderrFile.Flush(); $stderrFile.Dispose(); $stderrFile = $null }
         $stdout = if ($StdoutPath -and (Test-Path -LiteralPath $StdoutPath -PathType Leaf)) { [IO.File]::ReadAllText($StdoutPath, $utf8NoBom) } elseif ($stdoutCompleted) { $stdoutTask.GetAwaiter().GetResult() } else { '' }
         $stderr = if ($StderrPath -and (Test-Path -LiteralPath $StderrPath -PathType Leaf)) { [IO.File]::ReadAllText($StderrPath, $utf8NoBom) } elseif ($stderrCompleted) { $stderrTask.GetAwaiter().GetResult() } else { 'Claude stderr remained open after process termination.' }
+        if(-not $stdoutCompleted){$detail=if($stdoutDrainError){$stdoutDrainError}else{'the stream remained open'};$stderr=(($stderr.TrimEnd("`r","`n"),"Claude stdout was not fully drained: $detail.")|Where-Object{$_})-join[Environment]::NewLine}
+        if(-not $stderrCompleted){$detail=if($stderrDrainError){$stderrDrainError}else{'the stream remained open'};$stderr=(($stderr.TrimEnd("`r","`n"),"Claude stderr was not fully drained: $detail.")|Where-Object{$_})-join[Environment]::NewLine}
         if ($stdinError) { $stderr = (($stderr.TrimEnd("`r", "`n"), "Claude stdin write failed: $stdinError") | Where-Object { $_ }) -join [Environment]::NewLine }
         return [pscustomobject]@{
-            ExitCode = if ($timedOut) { -1 } else { $process.ExitCode }
+            ExitCode = if ($timedOut -or -not $stdoutCompleted -or -not $stderrCompleted) { -1 } else { $process.ExitCode }
             TimedOut = $timedOut
             Stdout = $stdout
             Stderr = $stderr
@@ -385,7 +388,7 @@ function Copy-UntrackedFile {
 }
 
 function Sync-TrackedSnapshotPath {
-    param([string] $RelativePath, [string] $RepositoryRoot, [string] $SnapshotRoot)
+    param([string] $RelativePath, [string] $RepositoryRoot, [string] $SnapshotRoot, [string] $GitPath)
     $source = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $RelativePath))
     $destination = [IO.Path]::GetFullPath((Join-Path $SnapshotRoot $RelativePath))
     if (-not (Test-PathWithinRoot $source $RepositoryRoot) -or -not (Test-PathWithinRoot $destination $SnapshotRoot)) {
@@ -400,7 +403,12 @@ function Sync-TrackedSnapshotPath {
         return
     }
     if (Test-Path -LiteralPath $source -PathType Container) {
-        # A changed submodule is represented by its gitlink in the patch; do not copy its worktree.
+        $indexEntry = Invoke-GitText $GitPath $RepositoryRoot @('--literal-pathspecs','ls-files','-s','--',$RelativePath)
+        if($indexEntry -notmatch '^160000 '){throw "Changed tracked directory is not a submodule gitlink: $RelativePath"}
+        $submoduleStatus = Invoke-GitText $GitPath $source @('status','--porcelain=v1','--untracked-files=normal')
+        if($submoduleStatus){throw "Dirty submodules cannot be frozen safely: $RelativePath"}
+        $submoduleHead = Resolve-GitCommit $GitPath $source 'HEAD' 'Submodule HEAD'
+        [void](Invoke-GitText $GitPath $SnapshotRoot @('update-index','--add','--cacheinfo','160000',$submoduleHead,$RelativePath))
         return
     }
     if (Test-Path -LiteralPath $destination -PathType Leaf) { Remove-Item -LiteralPath $destination -Force }
@@ -416,13 +424,35 @@ function Remove-ReviewSandbox {
     $resolvedSnapshot = [IO.Path]::GetFullPath($SnapshotRoot)
     if (-not (Test-PathWithinRoot $resolvedSnapshot $resolvedSandbox)) { throw "Refusing to clean unexpected snapshot path: $resolvedSnapshot" }
     $worktreeError = $null
-    if (Test-Path -LiteralPath $resolvedSnapshot) {
-        try { [void](Invoke-GitText $GitPath $RepositoryRoot @('worktree', 'remove', '--force', $resolvedSnapshot)) }
-        catch { $worktreeError = $_.Exception.Message }
+    try { [void](Invoke-GitText $GitPath $RepositoryRoot @('worktree', 'remove', '--force', $resolvedSnapshot)) }
+    catch { $worktreeError = $_.Exception.Message }
+    if ($worktreeError) {
+        try {
+            $worktreeRecords = @(Split-GitNullList (Invoke-GitText $GitPath $RepositoryRoot @('worktree','list','--porcelain','-z')))
+            $normalizedSnapshot = $resolvedSnapshot.Replace('\','/').TrimEnd('/')
+            $stillRegistered = @($worktreeRecords | Where-Object {
+                if(-not $_.StartsWith('worktree ',[StringComparison]::Ordinal)){return $false}
+                $reportedPath=$_.Substring(9).Replace('\','/').TrimEnd('/')
+                return [string]::Equals($reportedPath,$normalizedSnapshot,[StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0
+        }
+        catch { throw "Git worktree cleanup failed; snapshot retained at ${resolvedSnapshot}: $worktreeError Worktree registration could not be verified." }
+        if ($stillRegistered) { throw "Git worktree cleanup failed; snapshot retained at ${resolvedSnapshot}: $worktreeError" }
     }
     if (Test-Path -LiteralPath $resolvedSnapshot) { Remove-Item -LiteralPath $resolvedSnapshot -Recurse -Force }
     if (Test-Path -LiteralPath $resolvedSandbox) { Remove-Item -LiteralPath $resolvedSandbox -Recurse -Force }
-    if ($worktreeError) { throw "Git worktree cleanup failed after the temporary files were removed: $worktreeError" }
+}
+
+function Remove-AnalysisSandbox {
+    param([string] $AnalysisRoot)
+    $systemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $resolvedAnalysis = [IO.Path]::GetFullPath($AnalysisRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $analysisParent = [IO.Path]::GetDirectoryName($resolvedAnalysis)
+    $analysisName = [IO.Path]::GetFileName($resolvedAnalysis)
+    if (-not $analysisParent.Equals($systemTemp, [StringComparison]::OrdinalIgnoreCase) -or $analysisName -notmatch '^claude-delegator-analysis-[0-9a-f]{32}$') {
+        throw "Refusing to clean unexpected analysis path: $resolvedAnalysis"
+    }
+    if (Test-Path -LiteralPath $resolvedAnalysis) { Remove-Item -LiteralPath $resolvedAnalysis -Recurse -Force }
 }
 
 function Get-AssistantText {
@@ -497,7 +527,7 @@ $runStartedAtUtc = [DateTime]::UtcNow.ToString('o')
 $promptSha256 = Get-Utf8Sha256 $Prompt
 $resolvedRunDirectory = $null
 if ($RunDirectory) {
-    $resolvedRunDirectory = [IO.Path]::GetFullPath($RunDirectory)
+    $resolvedRunDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RunDirectory)
     if (Test-Path -LiteralPath $resolvedRunDirectory) {
         if (-not (Test-Path -LiteralPath $resolvedRunDirectory -PathType Container)) { throw "RunDirectory is not a directory: $resolvedRunDirectory" }
         if (@(Get-ChildItem -LiteralPath $resolvedRunDirectory -Force).Count) { throw "RunDirectory must be new or empty: $resolvedRunDirectory" }
@@ -506,7 +536,7 @@ if ($RunDirectory) {
     Write-AtomicUtf8Text (Join-Path $resolvedRunDirectory 'stream.jsonl') ''
     Write-AtomicUtf8Text (Join-Path $resolvedRunDirectory 'stderr.log') ''
     Write-RunStatus $resolvedRunDirectory $runId 'preflight' $false $false $null $null $null
-    if (-not $RawJson) { "CLAUDE_DELEGATION_RUN_DIRECTORY=$resolvedRunDirectory" }
+    if (-not $RawJson -and -not $DryRun) { "CLAUDE_DELEGATION_RUN_DIRECTORY=$resolvedRunDirectory" }
 }
 
 $resolvedWorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
@@ -520,7 +550,7 @@ $reviewScope='bounded-analysis'; $inputTransport='prompt-only'; $repositoryRoot=
 $resolvedBaseRevision=$null; $resolvedHeadRevision=$null; $diffText=''; $diffStat=''; $diffSha256=$null; $evidencePatchSha256=$null; [long]$evidencePatchBytes=0
 $changedPaths=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $gitPath=$null; $sandboxRoot=$null; $snapshotRoot=$null; $evidenceRoot=$null; $manifestPath=$null; $patchPath=$null
-$sandboxPrepared=$false; $trackedPaths=@(); $untrackedPaths=@(); $untrackedStates=@(); [long]$untrackedTotalBytes=0
+$sandboxPrepared=$false; $trackedPaths=@(); $indexAdditionPaths=@(); $indexDeletionPaths=@(); $untrackedPaths=@(); $untrackedStates=@(); [long]$untrackedTotalBytes=0
 
 # Complete every Claude-local preflight before creating a Git worktree.
 $resolvedClaudePath=Resolve-ClaudeExecutable $ClaudePath
@@ -529,6 +559,10 @@ if($helpResult.ExitCode -ne 0){throw "Claude --help failed. $($helpResult.Stderr
 foreach($flag in @('--setting-sources','--no-session-persistence','--permission-mode','--tools','--allowedTools','--disallowedTools','--mcp-config','--strict-mcp-config','--max-budget-usd','--system-prompt','--append-system-prompt','--prompt-suggestions','--include-partial-messages','--output-format','--verbose','--effort','--model','--disable-slash-commands','--no-chrome')){if(-not $helpResult.Stdout.Contains($flag)){throw "Claude Code does not advertise $flag."}}
 $versionResult=Invoke-ClaudeProcess $resolvedClaudePath @('--version') '' ([IO.Path]::GetTempPath()) @{} 30000
 if($versionResult.TimedOut -or $versionResult.ExitCode -ne 0){throw "Claude --version failed. Exit code: $($versionResult.ExitCode). $($versionResult.Stderr.Trim())"}
+if($BaseRevision -or $ReviewWorkingTree){
+    $versionMatch=[regex]::Match($versionResult.Stdout,'(?<!\d)(\d+\.\d+\.\d+)(?!\d)')
+    if(-not $versionMatch.Success -or [version]$versionMatch.Groups[1].Value -lt [version]'2.1.223'){throw 'Repository review requires Claude Code 2.1.223 or newer for the current /code-review target semantics.'}
+}
 $authInfo=Get-ClaudeAuthInfo $resolvedClaudePath
 $authMethod=[string](Get-PropertyValue $authInfo 'authMethod'); $apiProvider=[string](Get-PropertyValue $authInfo 'apiProvider'); $subscriptionType=[string](Get-PropertyValue $authInfo 'subscriptionType')
 $overrideNames=@('ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY','ANTHROPIC_BASE_URL')
@@ -549,9 +583,14 @@ if ($BaseRevision -or $ReviewWorkingTree) {
     if ($ReviewWorkingTree) {
         $reviewScope='working-tree'; $resolvedHeadRevision=$repositoryHead
         $diffText = Invoke-GitText $gitPath $repositoryRoot @('diff','HEAD','--binary','--full-index','--no-ext-diff','--no-textconv','--find-renames',"--unified=$UnifiedContext",'--')
-        $diffStat = Invoke-GitText $gitPath $repositoryRoot @('diff','HEAD','--stat','--summary','--')
+        $diffStat = Invoke-GitText $gitPath $repositoryRoot @('diff','HEAD','--stat','--summary','--no-ext-diff','--no-textconv','--')
         $trackedNames = Invoke-GitText $gitPath $repositoryRoot @('-c','core.quotePath=false','diff','HEAD','--name-only','-z','--no-renames','--')
         $trackedPaths = @(Split-GitNullList $trackedNames)
+        $indexAdditionNames = Invoke-GitText $gitPath $repositoryRoot @('-c','core.quotePath=false','diff','--cached','HEAD','--name-only','-z','--diff-filter=A','--no-renames','--')
+        $indexAdditionPaths = @(Split-GitNullList $indexAdditionNames)
+        $indexDeletionNames = Invoke-GitText $gitPath $repositoryRoot @('-c','core.quotePath=false','diff','--cached','HEAD','--name-only','-z','--diff-filter=D','--no-renames','--')
+        $indexDeletionPaths = @(Split-GitNullList $indexDeletionNames)
+        foreach($path in $indexAdditionPaths){if(-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $path))){throw "Staged additions deleted from the working tree cannot be frozen safely: $path"}}
         foreach ($path in $trackedPaths) { [void]$changedPaths.Add($path) }
         $untrackedNames = Invoke-GitText $gitPath $repositoryRoot @('-c','core.quotePath=false','ls-files','-z','--others','--exclude-standard')
         $untrackedPaths = @(Split-GitNullList $untrackedNames)
@@ -568,8 +607,8 @@ if ($BaseRevision -or $ReviewWorkingTree) {
         $resolvedHeadRevision=Resolve-GitCommit $gitPath $repositoryRoot $HeadRevision 'Head'
         $range="$resolvedBaseRevision...$resolvedHeadRevision"
         $diffText=Invoke-GitText $gitPath $repositoryRoot @('diff','--binary','--full-index','--no-ext-diff','--no-textconv','--find-renames',"--unified=$UnifiedContext",$range,'--')
-        $diffStat=Invoke-GitText $gitPath $repositoryRoot @('diff','--stat','--summary',$range,'--')
-        $names=Invoke-GitText $gitPath $repositoryRoot @('-c','core.quotePath=false','diff','--name-only','-z',$range,'--')
+        $diffStat=Invoke-GitText $gitPath $repositoryRoot @('diff','--stat','--summary','--no-ext-diff','--no-textconv',$range,'--')
+        $names=Invoke-GitText $gitPath $repositoryRoot @('-c','core.quotePath=false','diff','--name-only','-z','--no-renames',$range,'--')
         foreach ($path in @(Split-GitNullList $names)) { [void]$changedPaths.Add($path) }
     }
     if (-not $diffText -and -not $changedPaths.Count) {
@@ -580,8 +619,8 @@ if ($BaseRevision -or $ReviewWorkingTree) {
             prompt_sha256=$promptSha256; prompt_bytes=$promptBytes
         }
         Complete-DurableRun $resolvedRunDirectory $runId $noChangesMetadata $null $null $true
-        'No changes found in the requested review scope.'
-        Format-MetadataLine $noChangesMetadata
+        if($RawJson){[ordered]@{claude=$null;recovered_review=$null;delegation_metadata=$noChangesMetadata}|ConvertTo-Json -Depth 100 -Compress}
+        else{'No changes found in the requested review scope.';Format-MetadataLine $noChangesMetadata}
         return
     }
     $diffBytes=[Text.Encoding]::UTF8.GetByteCount($diffText)
@@ -595,8 +634,10 @@ if ($BaseRevision -or $ReviewWorkingTree) {
     try {
         [void](Invoke-GitText $gitPath $repositoryRoot @('-c',"core.hooksPath=$nullDevice",'worktree','add','--detach',$snapshotRoot,$resolvedHeadRevision))
         if ($ReviewWorkingTree) {
-            foreach ($path in $trackedPaths) { Sync-TrackedSnapshotPath $path $repositoryRoot $snapshotRoot }
+            foreach ($path in $trackedPaths) { Sync-TrackedSnapshotPath $path $repositoryRoot $snapshotRoot $gitPath }
             foreach ($path in $untrackedPaths) { Copy-UntrackedFile $path $repositoryRoot $snapshotRoot }
+            if($indexAdditionPaths.Count){[void](Invoke-GitText $gitPath $snapshotRoot (@('--literal-pathspecs','add','-N','-f','--') + $indexAdditionPaths))}
+            if($indexDeletionPaths.Count){[void](Invoke-GitText $gitPath $snapshotRoot (@('--literal-pathspecs','update-index','--force-remove','--') + $indexDeletionPaths))}
 
             $sourceDiffCheck=Invoke-GitText $gitPath $repositoryRoot @('diff','HEAD','--binary','--full-index','--no-ext-diff','--no-textconv','--find-renames',"--unified=$UnifiedContext",'--')
             $sourceUntrackedNames=Invoke-GitText $gitPath $repositoryRoot @('-c','core.quotePath=false','ls-files','-z','--others','--exclude-standard')
@@ -610,8 +651,13 @@ if ($BaseRevision -or $ReviewWorkingTree) {
             if($sourceFingerprintCheck -ne $workingTreeFingerprint){throw 'The working tree changed while its review snapshot was being prepared. Retry only after the checkout is stable.'}
 
             $diffText=Invoke-GitText $gitPath $snapshotRoot @('diff','HEAD','--binary','--full-index','--no-ext-diff','--no-textconv','--find-renames',"--unified=$UnifiedContext",'--')
-            $diffStat=Invoke-GitText $gitPath $snapshotRoot @('diff','HEAD','--stat','--summary','--')
-            $snapshotUntrackedStates=@($untrackedPaths|ForEach-Object{Get-UntrackedFileState $_ $snapshotRoot})
+            $diffStat=Invoke-GitText $gitPath $snapshotRoot @('diff','HEAD','--stat','--summary','--no-ext-diff','--no-textconv','--')
+            $snapshotUntrackedNames=Invoke-GitText $gitPath $snapshotRoot @('-c','core.quotePath=false','ls-files','-z','--others','--exclude-standard')
+            $snapshotUntrackedPaths=@(Split-GitNullList $snapshotUntrackedNames)
+            if($snapshotUntrackedPaths.Count -gt $MaxUntrackedFiles){throw "Frozen snapshot has $($snapshotUntrackedPaths.Count) untracked files; local ceiling is $MaxUntrackedFiles."}
+            $snapshotUntrackedStates=@($snapshotUntrackedPaths|ForEach-Object{Get-UntrackedFileState $_ $snapshotRoot})
+            $snapshotUntrackedBytes=if($snapshotUntrackedStates.Count){[long](($snapshotUntrackedStates|Measure-Object -Property bytes -Sum).Sum)}else{0}
+            if($snapshotUntrackedBytes -gt $MaxEvidenceBytes){throw "Frozen snapshot untracked files total $snapshotUntrackedBytes bytes; local ceiling is $MaxEvidenceBytes bytes."}
             $diffText=Add-UntrackedEvidence $diffText $snapshotUntrackedStates
             if((Get-Utf8Sha256 $diffText) -ne $workingTreeFingerprint){throw 'The frozen review snapshot does not match the captured working tree.'}
             $diffBytes=[Text.Encoding]::UTF8.GetByteCount($diffText)
@@ -630,6 +676,7 @@ if ($BaseRevision -or $ReviewWorkingTree) {
     catch {
         $preflightError=$_
         if($sandboxPrepared){try{Remove-ReviewSandbox $gitPath $repositoryRoot $sandboxRoot $snapshotRoot;$sandboxPrepared=$false}catch{}}
+        elseif($sandboxRoot -and (Test-Path -LiteralPath $sandboxRoot)){Remove-Item -LiteralPath $sandboxRoot -Recurse -Force -ErrorAction SilentlyContinue}
         throw $preflightError
     }
 }
@@ -637,10 +684,6 @@ else { $diffBytes=0 }
 
 $diffLineCount=Get-LineCount $diffText
 $nativeCodeReview=$reviewScope -ne 'bounded-analysis'
-if($nativeCodeReview){
-    $versionMatch=[regex]::Match($versionResult.Stdout,'(?<!\d)(\d+\.\d+\.\d+)(?!\d)')
-    if(-not $versionMatch.Success -or [version]$versionMatch.Groups[1].Value -lt [version]'2.1.223'){throw 'Repository review requires Claude Code 2.1.223 or newer for the current /code-review target semantics.'}
-}
 $scopeText=switch($reviewScope){
     'commit-range'{"Mode: verified commit range`nBase: $resolvedBaseRevision`nHead: $resolvedHeadRevision`nPatch SHA-256: $diffSha256"}
     'working-tree'{"Mode: frozen working tree`nRepository HEAD: $repositoryHead`nPatch SHA-256: $diffSha256"}
@@ -705,11 +748,18 @@ if($budgetApplied){$arguments.Add('--max-budget-usd');$arguments.Add($budgetText
 if($DryRun){
     $metadata.status='dry_run';$metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o')
     if($sandboxPrepared){try{Remove-ReviewSandbox $gitPath $repositoryRoot $sandboxRoot $snapshotRoot;$metadata.sandbox_cleanup_succeeded=$true}catch{$metadata.sandbox_cleanup_succeeded=$false;$metadata.sandbox_cleanup_error=$_.Exception.Message}}
+    if($metadata.sandbox_cleanup_succeeded -eq $false){$metadata.status='sandbox_cleanup_failed';$message='The review snapshot could not be cleaned up.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $null $message $false;throw "$message`n$(Format-MetadataLine $metadata)"}
     Complete-DurableRun $resolvedRunDirectory $runId $metadata $null $null $false
     [pscustomobject]@{ClaudePath=$resolvedClaudePath;Arguments=@($arguments);Prompt=$effectivePrompt;Metadata=$metadata};return
 }
 
-$processWorkingDirectory=if($nativeCodeReview){$snapshotRoot}elseif($reviewScope -eq 'bounded-analysis'){[IO.Path]::GetTempPath()}else{$sandboxRoot}
+$analysisRoot=$null
+$processWorkingDirectory=if($nativeCodeReview){$snapshotRoot}elseif($reviewScope -eq 'bounded-analysis'){
+    $analysisRoot=Join-Path ([IO.Path]::GetTempPath()) ('claude-delegator-analysis-'+[Guid]::NewGuid().ToString('N'))
+    $analysisWorkingDirectory=Join-Path $analysisRoot 'work'
+    [IO.Directory]::CreateDirectory($analysisWorkingDirectory) | Out-Null
+    $analysisWorkingDirectory
+}else{$sandboxRoot}
 $streamPath=if($resolvedRunDirectory){Join-Path $resolvedRunDirectory 'stream.jsonl'}else{$null}
 $stderrPath=if($resolvedRunDirectory){Join-Path $resolvedRunDirectory 'stderr.log'}else{$null}
 $stopwatch=[Diagnostics.Stopwatch]::StartNew()
@@ -732,6 +782,7 @@ catch{$processError=$_.Exception}
 finally{
     $stopwatch.Stop()
     if($sandboxPrepared){try{Remove-ReviewSandbox $gitPath $repositoryRoot $sandboxRoot $snapshotRoot;$metadata.sandbox_cleanup_succeeded=$true}catch{$metadata.sandbox_cleanup_succeeded=$false;$metadata.sandbox_cleanup_error=$_.Exception.Message}}
+    if($analysisRoot){try{Remove-AnalysisSandbox $analysisRoot}catch{if(-not $processError){$processError=[InvalidOperationException]::new("Could not clean the bounded-analysis sandbox. $($_.Exception.GetBaseException().Message)")}}}
 }
 $metadata.elapsed_ms=$stopwatch.ElapsedMilliseconds;$metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o')
 if($processError){
@@ -761,19 +812,40 @@ foreach($line in $streamLines){
 }
 $metadata.invalid_stream_line_count=$invalid.Count;$metadata.tool_usage=$toolCounts;$metadata.tool_call_count=[int](($toolCounts.Values|Measure-Object -Sum).Sum);$metadata.inspected_paths=@($inspected|Sort-Object);$metadata.unexpected_tool_calls=@($unexpected|Sort-Object)
 $recoveredText=if($assistantText){$assistantText}else{$partialText.ToString()};$metadata.recovered_output_chars=$recoveredText.Length
+if($metadata.sandbox_cleanup_succeeded -eq $false){$cleanupReview=Get-PropertyValue $response 'result';if($null -eq $cleanupReview){$cleanupReview=$recoveredText};$metadata.status='sandbox_cleanup_failed';$metadata.partial_output_recovered=[bool]$cleanupReview;$message='The review snapshot could not be cleaned up.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $cleanupReview $message $false;$partial=if($cleanupReview){"`n<incomplete_claude_review>`n$cleanupReview`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
 if($processResult.TimedOut){$metadata.status='error_timeout';$metadata.partial_output_recovered=[bool]$recoveredText;$message="Claude review exceeded $MaxRuntimeMinutes minutes.";Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
 if($null -eq $response){$metadata.status='missing_result_event';$metadata.partial_output_recovered=[bool]$recoveredText;$message='Claude returned no terminal result.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};$stderr=if($processResult.Stderr){"`n<claude_stderr>`n$($processResult.Stderr.Trim())`n</claude_stderr>"}else{''};throw "$message$partial$stderr`n$(Format-MetadataLine $metadata)"}
 try{Add-ResponseMetadata $metadata $response}catch{$metadata.metadata_collection_error=$_.Exception.Message}
+$positiveUsage = [double]0
+$usageValidationError = $null
+foreach($usageField in @('input_tokens','output_tokens','cache_creation_input_tokens','cache_read_input_tokens')){
+    $usageValue = $metadata[$usageField]
+    if($null -eq $usageValue){continue}
+    try{$numericUsage=[Convert]::ToDouble($usageValue,[Globalization.CultureInfo]::InvariantCulture)}
+    catch{$usageValidationError="Claude returned a non-numeric $usageField value.";break}
+    if([double]::IsNaN($numericUsage) -or [double]::IsInfinity($numericUsage) -or $numericUsage -lt 0){$usageValidationError="Claude returned an invalid $usageField value.";break}
+    $positiveUsage += $numericUsage
+}
+if($usageValidationError){$metadata.status='malformed_usage_metadata';$metadata.metadata_collection_error=$usageValidationError;$metadata.partial_output_recovered=[bool]$recoveredText;$metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o');$message='Claude token usage metadata was invalid.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
 $isError=Get-PropertyValue $response 'is_error';$subtype=Get-PropertyValue $response 'subtype'
-if($processResult.ExitCode -ne 0 -or $isError -eq $true -or ($subtype -is [string] -and $subtype.StartsWith('error_',[StringComparison]::OrdinalIgnoreCase))){$base=if($subtype){$subtype}else{'claude_error'};$metadata.partial_output_recovered=[bool]$recoveredText;$metadata.status=if($recoveredText){"partial_$base"}else{$base};$message='Claude review did not complete.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
+if($processResult.ExitCode -ne 0 -or $isError -eq $true -or ($subtype -is [string] -and $subtype.StartsWith('error_',[StringComparison]::OrdinalIgnoreCase))){$base=if($subtype -and $subtype -ne 'success'){$subtype}else{'claude_error'};$metadata.partial_output_recovered=[bool]$recoveredText;$metadata.status=if($recoveredText){"partial_$base"}else{$base};$message='Claude review did not complete.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
 if($unexpected.Count -and -not $nativeCodeReview){$metadata.status='security_boundary_violation';$message="Claude reported a tool outside the allowlist: $(@($unexpected)-join ', ').";Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;throw "$message`n$(Format-MetadataLine $metadata)"}
 $result=Get-PropertyValue $response 'result';if($null -eq $result -and $recoveredText){$result=$recoveredText};if($null -eq $result){$result=Get-PropertyValue $response 'structured_output'}
 if($null -eq $result){$metadata.status='missing_result';$message='Claude returned no result.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;throw "$message`n$(Format-MetadataLine $metadata)"}
 $protocol=if($result -is [string]){$result}else{$recoveredText}
+if($nativeCodeReview -and $protocol -is [string] -and $protocol.StartsWith('Failed to authenticate. API Error: 401',[StringComparison]::Ordinal) -and $protocol.Contains('OAuth access token has expired.')){$metadata.status='authentication_failed';$metadata.partial_output_recovered=$false;$message='Claude native code review authentication expired before it produced a review.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $result $message $false;throw "$message`n$(Format-MetadataLine $metadata)"}
+if($nativeCodeReview -and $positiveUsage -le 0){$metadata.status='native_review_no_model_usage';$metadata.partial_output_recovered=[bool]$result;$message='Claude native code review returned no verifiable model usage.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $result $message $false;$partial=if($result){"`n<incomplete_claude_review>`n$protocol`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
 if($nativeCodeReview){if([string]::IsNullOrWhiteSpace([string]$protocol)){$metadata.status='native_review_empty';$message='Claude native code review returned no findings result.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;throw "$message`n$(Format-MetadataLine $metadata)"};$metadata.native_review_completed=$true;$metadata.status='success_native_review'}
-elseif($protocol -match '(?m)^MORE_FINDINGS_REMAIN\s*$'){$metadata.completion_marker='MORE_FINDINGS_REMAIN';$metadata.overflow_reported=$true;$metadata.status='success_with_overflow'}elseif($protocol -match '(?m)^REVIEW_COMPLETE\s*$'){$metadata.completion_marker='REVIEW_COMPLETE';$metadata.status='success'}else{$metadata.status='protocol_incomplete';$metadata.partial_output_recovered=[bool]$protocol;$message='Claude returned without a completion marker.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $protocol $message $false;$partial=if($protocol){"`n<incomplete_claude_review>`n$protocol`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
+else{
+    $lastProtocolLine=$null
+    foreach($protocolLine in ([string]$protocol -split "`n")){if(-not [string]::IsNullOrWhiteSpace($protocolLine)){$lastProtocolLine=$protocolLine.TrimEnd("`r")}}
+    if($lastProtocolLine -ceq 'MORE_FINDINGS_REMAIN'){$metadata.completion_marker='MORE_FINDINGS_REMAIN';$metadata.overflow_reported=$true;$metadata.status='success_with_overflow'}
+    elseif($lastProtocolLine -ceq 'REVIEW_COMPLETE'){$metadata.completion_marker='REVIEW_COMPLETE';$metadata.status='success'}
+    else{$metadata.status='protocol_incomplete';$metadata.partial_output_recovered=[bool]$protocol;$message='Claude returned without a completion marker.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $protocol $message $false;$partial=if($protocol){"`n<incomplete_claude_review>`n$protocol`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
+}
 $reviewComplete = $metadata.status -ne 'success_with_overflow'
-Complete-DurableRun $resolvedRunDirectory $runId $metadata $result $null $reviewComplete
+try{Complete-DurableRun $resolvedRunDirectory $runId $metadata $result $null $reviewComplete}
+catch{$metadata.status='durable_publish_failed';$metadata.durable_artifact_error=$_.Exception.GetBaseException().Message;$metadata.partial_output_recovered=[bool]$result;$metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o');$message='Could not publish terminal durable results.';try{Complete-DurableRun $resolvedRunDirectory $runId $metadata $result $message $false}catch{};$partial=if($result){"`n<incomplete_claude_review>`n$protocol`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
 if($RawJson){[ordered]@{claude=$response;recovered_review=$result;delegation_metadata=$metadata}|ConvertTo-Json -Depth 100 -Compress;return}
 if($result -is [string]){$result}else{$result|ConvertTo-Json -Depth 100}
 "`n$(Format-MetadataLine $metadata)"
