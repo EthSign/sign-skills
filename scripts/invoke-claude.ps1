@@ -21,7 +21,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$wrapperVersion = '7.2.0'
+$wrapperVersion = '7.2.1'
 $maximumPromptBytes = 256KB
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 $gitCommandTimeoutMilliseconds = $GitCommandTimeoutSeconds * 1000
@@ -269,8 +269,10 @@ function Invoke-ClaudeProcess {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $stdoutFile = $null
     $stderrFile = $null
+    $childStarted = $false
     try {
         if (-not $process.Start()) { throw 'Claude Code process did not start.' }
+        $childStarted = $true
         if ($OnStarted) { & $OnStarted $process.Id }
         if ($StdoutPath) {
             $stdoutFile = New-Object IO.FileStream($StdoutPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read, 1, [IO.FileOptions]::WriteThrough)
@@ -326,6 +328,17 @@ function Invoke-ClaudeProcess {
         }
     }
     finally {
+        # Dispose releases the handle; it does not terminate a live process.
+        # Cover exceptions during stream setup, input delivery, and output capture.
+        if ($childStarted -and -not $process.HasExited) {
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                $previousPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                try { & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F 2>$null | Out-Null }
+                finally { $ErrorActionPreference = $previousPreference }
+            }
+            if (-not $process.HasExited) { $process.Kill() }
+            if (-not $process.WaitForExit(5000)) { throw 'Claude process remained alive after termination was requested.' }
+        }
         if ($stdoutFile) { $stdoutFile.Dispose() }
         if ($stderrFile) { $stderrFile.Dispose() }
         $clock.Stop(); $process.Dispose()
@@ -539,6 +552,10 @@ if ($RunDirectory) {
     if (-not $RawJson -and -not $DryRun) { "CLAUDE_DELEGATION_RUN_DIRECTORY=$resolvedRunDirectory" }
 }
 
+$metadata = $null
+$sandboxPrepared = $false
+$analysisRoot = $null
+try {
 $resolvedWorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
 if (-not (Test-Path -LiteralPath $resolvedWorkingDirectory -PathType Container)) { throw "Working directory is not a directory: $WorkingDirectory" }
 $promptBytes = [Text.Encoding]::UTF8.GetByteCount($Prompt)
@@ -753,13 +770,39 @@ if($DryRun){
     [pscustomobject]@{ClaudePath=$resolvedClaudePath;Arguments=@($arguments);Prompt=$effectivePrompt;Metadata=$metadata};return
 }
 
-$analysisRoot=$null
 $processWorkingDirectory=if($nativeCodeReview){$snapshotRoot}elseif($reviewScope -eq 'bounded-analysis'){
     $analysisRoot=Join-Path ([IO.Path]::GetTempPath()) ('claude-delegator-analysis-'+[Guid]::NewGuid().ToString('N'))
     $analysisWorkingDirectory=Join-Path $analysisRoot 'work'
     [IO.Directory]::CreateDirectory($analysisWorkingDirectory) | Out-Null
     $analysisWorkingDirectory
 }else{$sandboxRoot}
+}
+catch {
+    $preflightFailure = $_
+    if ($null -eq $metadata) {
+        $metadata = [ordered]@{
+            schema_version=3; wrapper_version=$wrapperVersion; run_id=$runId; run_directory=$resolvedRunDirectory
+            started_at_utc=$runStartedAtUtc; completed_at_utc=$null; status='preflight_error'
+            claude_start_attempted=$false; claude_started=$false; claude_process_id=$null
+            prompt_sha256=$promptSha256; model=$Model; effort=$Effort
+            sandbox_cleanup_succeeded=$null; sandbox_cleanup_error=$null
+        }
+    }
+    if ($sandboxPrepared) {
+        try { Remove-ReviewSandbox $gitPath $repositoryRoot $sandboxRoot $snapshotRoot; $metadata.sandbox_cleanup_succeeded=$true }
+        catch { $metadata.sandbox_cleanup_succeeded=$false; $metadata.sandbox_cleanup_error=$_.Exception.Message }
+    }
+    $metadata.status='preflight_error'
+    if ($analysisRoot) {
+        try { Remove-AnalysisSandbox $analysisRoot }
+        catch { $metadata['analysis_cleanup_error']=$_.Exception.Message }
+    }
+    $metadata.completed_at_utc=[DateTime]::UtcNow.ToString('o')
+    try { Complete-DurableRun $resolvedRunDirectory $runId $metadata $null $preflightFailure.Exception.Message $false }
+    catch { $metadata['durable_artifact_error']=$_.Exception.GetBaseException().Message }
+    throw "$($preflightFailure.Exception.Message)`n$(Format-MetadataLine $metadata)"
+}
+
 $streamPath=if($resolvedRunDirectory){Join-Path $resolvedRunDirectory 'stream.jsonl'}else{$null}
 $stderrPath=if($resolvedRunDirectory){Join-Path $resolvedRunDirectory 'stderr.log'}else{$null}
 $stopwatch=[Diagnostics.Stopwatch]::StartNew()
@@ -816,6 +859,13 @@ if($metadata.sandbox_cleanup_succeeded -eq $false){$cleanupReview=Get-PropertyVa
 if($processResult.TimedOut){$metadata.status='error_timeout';$metadata.partial_output_recovered=[bool]$recoveredText;$message="Claude review exceeded $MaxRuntimeMinutes minutes.";Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};throw "$message$partial`n$(Format-MetadataLine $metadata)"}
 if($null -eq $response){$metadata.status='missing_result_event';$metadata.partial_output_recovered=[bool]$recoveredText;$message='Claude returned no terminal result.';Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false;$partial=if($recoveredText){"`n<incomplete_claude_review>`n$recoveredText`n</incomplete_claude_review>"}else{''};$stderr=if($processResult.Stderr){"`n<claude_stderr>`n$($processResult.Stderr.Trim())`n</claude_stderr>"}else{''};throw "$message$partial$stderr`n$(Format-MetadataLine $metadata)"}
 try{Add-ResponseMetadata $metadata $response}catch{$metadata.metadata_collection_error=$_.Exception.Message}
+if ($invalid.Count -gt 0) {
+    $metadata.status='malformed_stream'
+    $metadata.partial_output_recovered=[bool]$recoveredText
+    $message='Claude returned malformed JSON stream lines; the review is incomplete.'
+    Complete-DurableRun $resolvedRunDirectory $runId $metadata $recoveredText $message $false
+    throw "$message`n$(Format-MetadataLine $metadata)"
+}
 $positiveUsage = [double]0
 $usageValidationError = $null
 foreach($usageField in @('input_tokens','output_tokens','cache_creation_input_tokens','cache_read_input_tokens')){

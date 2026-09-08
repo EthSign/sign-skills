@@ -200,6 +200,7 @@ Run the Windows durability suite from PowerShell:
 
 ```powershell
 & .\tests\test-durable-runs.ps1
+& .\tests\test-failure-paths.ps1
 ```
 
 The macOS suite uses a fake Claude executable and makes no network call. See

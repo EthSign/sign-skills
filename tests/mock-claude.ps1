@@ -31,6 +31,7 @@ end {
     }
     if ($env:CLAUDE_DELEGATOR_TEST_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:CLAUDE_DELEGATOR_TEST_DELAY_MS) }
 
+    if ($env:CLAUDE_DELEGATOR_TEST_MALFORMED -eq '1') { 'not valid JSON' }
     $review = if ($env:CLAUDE_DELEGATOR_TEST_ERROR -eq '1') {
         '[P1] sample.cs:1 - Recovered test finding. The mocked review intentionally fails after returning partial evidence.'
     }
