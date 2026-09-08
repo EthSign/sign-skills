@@ -6,7 +6,7 @@ param(
     [Parameter()][ValidateNotNullOrEmpty()][string] $HeadRevision,
     [Parameter()][switch] $ReviewWorkingTree,
     [Parameter()][ValidateSet('low', 'medium', 'high', 'xhigh', 'max')][string] $Effort = 'high',
-    [Parameter()][ValidateNotNullOrEmpty()][string] $Model = 'opus',
+    [Parameter()][ValidateNotNullOrEmpty()][string] $Model = 'fable',
     [Parameter()][ValidateRange(0.05, 100.0)][double] $MaxBudgetUsd = 0.50,
     [Parameter()][ValidateRange(0.05, 60)][double] $MaxRuntimeMinutes = 30,
     [Parameter()][ValidateRange(1MB, 256MB)][int] $MaxEvidenceBytes = 64MB,
@@ -21,7 +21,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$wrapperVersion = '7.1.0'
+$wrapperVersion = '7.2.0'
 $maximumPromptBytes = 256KB
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 $gitCommandTimeoutMilliseconds = $GitCommandTimeoutSeconds * 1000
