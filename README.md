@@ -7,6 +7,8 @@ analysis, exact commit-range reviews, and frozen working-tree reviews.
 Claude is advisory: Codex remains responsible for reproducing the findings,
 rejecting unsupported claims, and deciding what to present or change.
 
+See [CHANGELOG.md](CHANGELOG.md) for version history and platform-specific changes.
+
 ## Platform support
 
 | Platform | Entrypoint | Runtime |
