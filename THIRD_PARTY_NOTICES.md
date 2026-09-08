@@ -5,7 +5,7 @@
 - Imported from [`hstarorg/skills`](https://github.com/hstarorg/skills) at commit [`5e61add65334868e73439498c14bd0b52348fef3`](https://github.com/hstarorg/skills/commit/5e61add65334868e73439498c14bd0b52348fef3).
 - That upstream identifies the skill as an adaptation of [Cocoon AI's architecture-diagram-generator](https://github.com/Cocoon-AI/architecture-diagram-generator).
 - Both upstream projects identify the covered work as MIT-licensed. The required notices are retained in [`architecture-diagram/LICENSE`](architecture-diagram/LICENSE).
-- Sign adds Codex UI metadata; the imported skill instructions, template, and evaluation cases are otherwise unchanged.
+- Sign adds Codex UI metadata; the imported skill instructions and template are otherwise unchanged.
 
 ## Claude Delegator
 
