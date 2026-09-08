@@ -1,8 +1,9 @@
 # Sign Skills
 
-Reusable skills for Sign projects.
+Reusable internal Codex skills for Sign projects.
 
-## Status
+## Available skills
 
-This repository is being initialized. Skills and usage documentation will be
-added as the collection grows.
+- `sign-slide-design` — creates, redesigns, and reviews presentation decks against the official Sign deck design system.
+
+Each skill is self-contained and includes its own trigger guidance, references, metadata, and any approved assets needed to do the work faithfully.

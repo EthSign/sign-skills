@@ -1,0 +1,9 @@
+interface:
+  display_name: "Sign Slide Design"
+  short_description: "Apply Sign's official slide design system"
+  icon_small: "./assets/sign-logo.svg"
+  icon_large: "./assets/sign-logo.svg"
+  brand_color: "#FF7801"
+  default_prompt: "Use $sign-slide-design to redesign this deck in Sign's official presentation style."
+policy:
+  allow_implicit_invocation: true
