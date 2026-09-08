@@ -1,0 +1,4 @@
+interface:
+  display_name: "Architecture Diagram"
+  short_description: "Create polished technical architecture diagrams"
+  default_prompt: "Use $architecture-diagram to create a polished architecture diagram for this system."
