@@ -1,18 +1,14 @@
 # Sign deck design system
 
-Use these tokens for non-Figma presentation formats. In Figma, apply the corresponding variables and text styles instead of raw values.
+This is the complete standalone specification for everyday Sign slide authoring. Apply these semantic tokens and rules directly in PowerPoint, Google Slides, Figma Slides, or another presentation format. Do not fetch an external template before using them.
 
-## Source and freshness
+## Packaged version
 
-- Canonical source: `https://www.figma.com/design/GLoo96tpJFrXQ6WcQTdDC0/Deck?node-id=6685-200&p=f&m=dev`
-- Figma file key: `GLoo96tpJFrXQ6WcQTdDC0`
-- Root node: `6685:200`
-- Snapshot inspected: 2026-09-07
-- Template label shown in source: V1.0 / 08-2026
+- Sign Deck Design System: V1.0 / 08-2026
+- Standalone package revision: 2026-09-07
+- Included assets: Sign logo, two approved orange section textures, Archivo, IBM Plex Mono, and their license notices
 
-When the user asks for the latest system, inspect the source page and the relevant template/component nodes. Update this reference only when the official source changed. Export stable local assets; do not copy temporary Figma asset URLs into this skill.
-
-Key sections: color `6685:246`; typography `6685:293`; anatomy/grid `6685:327`; components `6685:360`; templates `6685:562`; example layouts `6685:750`; graphics `6685:823`.
+The files in `assets/` and the rules below are sufficient to create and validate a Sign deck offline. External-source identity and update procedures live separately in `source-maintenance.md` and are relevant only when maintaining this skill.
 
 ## Canvas and anatomy
 
@@ -71,7 +67,7 @@ Do not introduce decorative fonts. Avoid heavy bold across whole headlines; use 
 
 ## Components and graphics
 
-Canonical component nodes include: logo `6685:361`, content header `6685:373`, content footer `6685:391`, callout `6685:397`, feature card `6685:400`, text card `6685:406`, highlight panel `6685:477`, numbered item `6685:496`, 3-column table `6685:503`, big number `6685:529`, pull quote `6685:533`, roadmap step `6685:540`, agenda item `6685:545`, profile card `6685:552`, outline tag `6685:558`, and accent tag `6685:560`.
+Approved component families include: Sign logo, content header, content footer, callout, feature card, text card, highlight panel, numbered item, 3-column table, big number, pull quote, roadmap step, agenda item, profile card, outline tag, and accent tag.
 
 Custom diagrams use IBM Plex Mono text, orange-tinted fills on cream, hairline borders, light hatching, and generous whitespace. Prefer simple native shapes and editable connectors. Do not imitate generic SaaS dashboard cards or use unrelated stock icon styles.
 

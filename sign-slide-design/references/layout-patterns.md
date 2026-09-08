@@ -37,4 +37,4 @@ Place the recorded product moment where it resolves the central tension. Use the
 
 Score 0–2 for each: activation precision, source handling, brand fidelity, layout judgment, asset integrity, scope preservation, and visual verification. Pass at 12/14 or higher with no hard failure.
 
-Hard failures: changing factual claims without authorization; altering the logo; full-orange ordinary content slides; stale temporary Figma URLs; silent font substitution; or delivery without rendering and visual inspection.
+Hard failures: changing factual claims without authorization; altering the logo; full-orange ordinary content slides; remote or temporary asset dependencies; silent font substitution; or delivery without rendering and visual inspection.
