@@ -14,5 +14,7 @@ Each skill is self-contained and includes a reader-facing `README.md`, an agent-
 
 ## Useful tools
 
-- [Recordly](https://github.com/webadderallorg/Recordly) — An open-source desktop screen recorder and editor for polished walkthroughs, demos, and product videos.
-- [ChatterBot](https://github.com/gunthercox/ChatterBot) — A Python conversational dialog engine for building chatbots with machine learning.
+| Tool | Purpose |
+| --- | --- |
+| [Recordly](https://github.com/webadderallorg/Recordly) | An open-source desktop screen recorder and editor for polished walkthroughs, demos, and product videos. |
+| [ChatterBot](https://github.com/gunthercox/ChatterBot) | A Python conversational dialog engine for building chatbots with machine learning. |
