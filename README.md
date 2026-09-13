@@ -17,4 +17,4 @@ Each skill is self-contained and includes a reader-facing `README.md`, an agent-
 | Tool | Purpose |
 | --- | --- |
 | [Recordly](https://github.com/webadderallorg/Recordly) | An open-source desktop screen recorder and editor for polished walkthroughs, demos, and product videos. |
-| [ChatterBot](https://github.com/gunthercox/ChatterBot) | A Python conversational dialog engine for building chatbots with machine learning. |
+| [Chatterbox](https://github.com/resemble-ai/chatterbox) | A family of open-source text-to-speech models for generating natural, expressive voices from text. |
