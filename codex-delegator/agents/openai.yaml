@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Delegator"
+  short_description: "Ask Codex for an independent read-only review"
+  default_prompt: "Use $codex-delegator to ask the Codex CLI for a bounded independent review."

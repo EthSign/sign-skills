@@ -12,3 +12,9 @@
 - Imported from [`EthSign/claude-delegator-codex`](https://github.com/EthSign/claude-delegator-codex) at commit `2238558772258900ecde4f3d4e542b5f5fd36b6c`.
 - The source checkout did not contain a license file at import time.
 - The skill instructions, UI metadata, wrappers, and regression tests are imported unchanged.
+
+## Codex Delegator
+
+- New local implementation for Claude Code-to-Codex review delegation, following the recovery and scope conventions of the adjacent Claude Delegator skill.
+- The Python runner and tests are newly implemented, not a copied third-party bridge or SDK. No additional third-party runtime package or license grant is introduced.
+- Protocol and installation references are linked in [`codex-delegator/README.md`](codex-delegator/README.md).
