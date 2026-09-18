@@ -11,7 +11,7 @@
 
 - Imported from [`EthSign/claude-delegator-codex`](https://github.com/EthSign/claude-delegator-codex) at commit `2238558772258900ecde4f3d4e542b5f5fd36b6c`.
 - The source checkout did not contain a license file at import time.
-- The skill instructions, UI metadata, wrappers, and regression tests are imported unchanged.
+- The original skill instructions, UI metadata, wrappers, and regression tests were imported unchanged. Version 8 replaces the duplicated wrappers and platform-specific tests with a local Python-only implementation and portable tests. The original files remain available in Git history.
 
 ## Codex Delegator
 
