@@ -47,10 +47,10 @@ class InstallTests(unittest.TestCase):
         for n in NAMES:
             self.assertEqual((self.agents / f"{n}.md").read_bytes(), self.src(n))
             self.assertIn(f"agents/{n}.md: created", r.stdout)
-        data = json.loads(self.manifest.read_text())
+        data = json.loads(self.manifest.read_text(encoding="utf-8"))
         self.assertEqual(data["version"], "1.0.0")
         self.assertEqual(data["agents"], {f"{n}.md": sha(self.src(n)) for n in NAMES})
-        text = self.claude_md.read_text()
+        text = self.claude_md.read_text(encoding="utf-8")
         self.assertIn(BEGIN + "\n" + self.rules, text)
         self.assertTrue(text.endswith(END + "\n"))
         self.assertIn("CLAUDE.md rules block: created", r.stdout)
@@ -70,9 +70,9 @@ class InstallTests(unittest.TestCase):
         self.run_install()
         old = b"old version of scout\n"
         (self.agents / "scout.md").write_bytes(old)
-        data = json.loads(self.manifest.read_text())
+        data = json.loads(self.manifest.read_text(encoding="utf-8"))
         data["agents"]["scout.md"] = sha(old)
-        self.manifest.write_text(json.dumps(data))
+        self.manifest.write_text(json.dumps(data), encoding="utf-8")
         r = self.run_install()
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("agents/scout.md: updated", r.stdout)
@@ -81,32 +81,32 @@ class InstallTests(unittest.TestCase):
 
     def test_foreign_file_skipped(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine")
+        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
         r = self.run_install()
         self.assertEqual(r.returncode, 1)
         self.assertIn("agents/scout.md: skipped: modified locally", r.stdout)
         self.assertIn("done with conflicts", r.stdout)
-        self.assertEqual((self.agents / "scout.md").read_text(), "mine")
-        self.assertNotIn("scout.md", json.loads(self.manifest.read_text())["agents"])
+        self.assertEqual((self.agents / "scout.md").read_text(encoding="utf-8"), "mine")
+        self.assertNotIn("scout.md", json.loads(self.manifest.read_text(encoding="utf-8"))["agents"])
         self.assertTrue((self.agents / "explorer.md").exists())
 
     def test_force_backs_up(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine")
+        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
         r = self.run_install("--force")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("agents/scout.md: replaced, backup at agents/scout.md.bak", r.stdout)
-        self.assertEqual((self.agents / "scout.md.bak").read_text(), "mine")
+        self.assertEqual((self.agents / "scout.md.bak").read_text(encoding="utf-8"), "mine")
         self.assertEqual((self.agents / "scout.md").read_bytes(), self.src("scout"))
 
     def test_force_existing_bak_uses_numbered(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine")
-        (self.agents / "scout.md.bak").write_text("older")
+        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
+        (self.agents / "scout.md.bak").write_text("older", encoding="utf-8")
         r = self.run_install("--force")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual((self.agents / "scout.md.bak").read_text(), "older")
-        self.assertEqual((self.agents / "scout.md.bak.1").read_text(), "mine")
+        self.assertEqual((self.agents / "scout.md.bak").read_text(encoding="utf-8"), "older")
+        self.assertEqual((self.agents / "scout.md.bak.1").read_text(encoding="utf-8"), "mine")
 
     def test_preserves_surrounding_crlf(self):
         pre, post = "# Mine\r\nline\r\n", "\r\n## After\r\nend\r\n"
@@ -143,11 +143,11 @@ class InstallTests(unittest.TestCase):
 
     def test_workflow_size_preserves_keys(self):
         (self.dir).mkdir(exist_ok=True)
-        (self.dir / "settings.json").write_text(json.dumps({"model": "opus", "a": {"b": 1}}))
+        (self.dir / "settings.json").write_text(json.dumps({"model": "opus", "a": {"b": 1}}), encoding="utf-8")
         r = self.run_install("--workflow-size", "unrestricted")
         self.assertEqual(r.returncode, 0)
         self.assertIn("settings.json workflowSizeGuideline: unrestricted", r.stdout)
-        raw = (self.dir / "settings.json").read_text()
+        raw = (self.dir / "settings.json").read_text(encoding="utf-8")
         self.assertTrue(raw.endswith("}\n"))
         self.assertEqual(json.loads(raw),
                          {"model": "opus", "a": {"b": 1}, "workflowSizeGuideline": "unrestricted"})
@@ -156,14 +156,14 @@ class InstallTests(unittest.TestCase):
         self.run_install()
         self.assertFalse((self.dir / "settings.json").exists())
         self.run_install("--workflow-size", "small")
-        self.assertEqual(json.loads((self.dir / "settings.json").read_text()),
+        self.assertEqual(json.loads((self.dir / "settings.json").read_text(encoding="utf-8")),
                          {"workflowSizeGuideline": "small"})
 
     def test_invalid_settings_json(self):
-        (self.dir / "settings.json").write_text("{not json")
+        (self.dir / "settings.json").write_text("{not json", encoding="utf-8")
         r = self.run_install("--workflow-size", "large")
         self.assertEqual(r.returncode, 2)
-        self.assertEqual((self.dir / "settings.json").read_text(), "{not json")
+        self.assertEqual((self.dir / "settings.json").read_text(encoding="utf-8"), "{not json")
 
     def test_dry_run_writes_nothing(self):
         r = self.run_install("--dry-run", "--workflow-size", "medium")
@@ -172,32 +172,32 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(list(self.dir.iterdir()), [])
 
     def test_uninstall(self):
-        self.claude_md.write_text("keep me\n")
+        self.claude_md.write_text("keep me\n", encoding="utf-8")
         self.run_install("--workflow-size", "large")
-        (self.agents / "scout.md").write_text("edited")
-        (self.agents / "other.md").write_text("unrelated")
+        (self.agents / "scout.md").write_text("edited", encoding="utf-8")
+        (self.agents / "other.md").write_text("unrelated", encoding="utf-8")
         settings = (self.dir / "settings.json").read_bytes()
         r = self.run_install("--uninstall")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("workflowSizeGuideline: left as is", r.stdout)
         self.assertEqual(sorted(p.name for p in self.agents.iterdir()), ["other.md", "scout.md"])
-        self.assertEqual((self.agents / "scout.md").read_text(), "edited")
-        self.assertEqual(self.claude_md.read_text(), "keep me\n")
+        self.assertEqual((self.agents / "scout.md").read_text(encoding="utf-8"), "edited")
+        self.assertEqual(self.claude_md.read_text(encoding="utf-8"), "keep me\n")
         self.assertFalse(self.manifest.exists())
         self.assertEqual((self.dir / "settings.json").read_bytes(), settings)
 
     def test_uninstall_force_removes_modified(self):
         self.run_install()
-        (self.agents / "scout.md").write_text("edited")
+        (self.agents / "scout.md").write_text("edited", encoding="utf-8")
         r = self.run_install("--uninstall", "--force")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertFalse((self.agents / "scout.md").exists())
 
     def test_no_rules(self):
-        self.claude_md.write_text("untouched")
+        self.claude_md.write_text("untouched", encoding="utf-8")
         r = self.run_install("--no-rules")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(self.claude_md.read_text(), "untouched")
+        self.assertEqual(self.claude_md.read_text(encoding="utf-8"), "untouched")
         fresh = self.dir / "sub"
         subprocess.run([sys.executable, str(SCRIPT), "--claude-dir", str(fresh), "--no-rules"],
                        capture_output=True)
@@ -238,24 +238,24 @@ class InstallTests(unittest.TestCase):
     def test_symlinked_claude_md_install_and_uninstall(self):
         real = self.dir / "elsewhere" / "real-claude.md"
         real.parent.mkdir()
-        real.write_text("mine\n")
+        real.write_text("mine\n", encoding="utf-8")
         self.link(self.claude_md, real)
         self.assertEqual(self.run_install().returncode, 0)
         self.assertTrue(self.claude_md.is_symlink())
-        self.assertIn(BEGIN, real.read_text())
-        self.assertTrue(real.read_text().startswith("mine\n\n"))
+        self.assertIn(BEGIN, real.read_text(encoding="utf-8"))
+        self.assertTrue(real.read_text(encoding="utf-8").startswith("mine\n\n"))
         self.assertEqual(self.run_install("--uninstall").returncode, 0)
         self.assertTrue(self.claude_md.is_symlink())
-        self.assertEqual(real.read_text(), "mine\n")
+        self.assertEqual(real.read_text(encoding="utf-8"), "mine\n")
 
     def test_symlinked_settings(self):
         real = self.dir / "elsewhere" / "real-settings.json"
         real.parent.mkdir()
-        real.write_text('{"x": 1}')
+        real.write_text('{"x": 1}', encoding="utf-8")
         self.link(self.dir / "settings.json", real)
         self.assertEqual(self.run_install("--workflow-size", "small").returncode, 0)
         self.assertTrue((self.dir / "settings.json").is_symlink())
-        self.assertEqual(json.loads(real.read_text()), {"x": 1, "workflowSizeGuideline": "small"})
+        self.assertEqual(json.loads(real.read_text(encoding="utf-8")), {"x": 1, "workflowSizeGuideline": "small"})
 
     def test_symlinked_agent_updated(self):
         self.run_install()
@@ -265,9 +265,9 @@ class InstallTests(unittest.TestCase):
         real.write_bytes(old)
         (self.agents / "scout.md").unlink()
         self.link(self.agents / "scout.md", real)
-        data = json.loads(self.manifest.read_text())
+        data = json.loads(self.manifest.read_text(encoding="utf-8"))
         data["agents"]["scout.md"] = sha(old)
-        self.manifest.write_text(json.dumps(data))
+        self.manifest.write_text(json.dumps(data), encoding="utf-8")
         r = self.run_install()
         self.assertIn("agents/scout.md: updated", r.stdout)
         self.assertTrue((self.agents / "scout.md").is_symlink())
@@ -278,13 +278,13 @@ class InstallTests(unittest.TestCase):
         self.claude_md.write_bytes(fenced.encode())
         r = self.run_install()
         self.assertEqual(r.returncode, 0, r.stdout)
-        text = self.claude_md.read_text()
+        text = self.claude_md.read_text(encoding="utf-8")
         self.assertTrue(text.startswith(fenced + "\n" + BEGIN + "\n"))
         self.assertEqual(text.count(BEGIN), 2)
         r = self.run_install()
         self.assertIn("rules block: unchanged", r.stdout)
         self.run_install("--uninstall")
-        self.assertEqual(self.claude_md.read_text(), fenced)
+        self.assertEqual(self.claude_md.read_text(encoding="utf-8"), fenced)
 
     def test_rules_containing_marker_rejected(self):
         script = self.make_skill(rules=f"a\n{END}\nb\n".encode())
@@ -313,22 +313,22 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_unsafe_manifest_key_ignored(self):
-        self.claude_md.write_text("precious\n")
+        self.claude_md.write_text("precious\n", encoding="utf-8")
         self.manifest.write_text(json.dumps(
             {"version": "0", "agents": {"../CLAUDE.md": sha(b"precious\n"), "x.txt": "0"}}))
         r = self.run_install("--uninstall", "--no-rules")
         self.assertIn("note: ignoring unsafe manifest entry '../CLAUDE.md'", r.stdout)
-        self.assertEqual(self.claude_md.read_text(), "precious\n")
+        self.assertEqual(self.claude_md.read_text(encoding="utf-8"), "precious\n")
         self.manifest.write_text(json.dumps(
             {"version": "0", "agents": {"../CLAUDE.md": sha(b"precious\n")}}))
         self.run_install("--no-rules")
-        self.assertEqual(self.claude_md.read_text(), "precious\n")
-        self.assertNotIn("../CLAUDE.md", self.manifest.read_text())
+        self.assertEqual(self.claude_md.read_text(encoding="utf-8"), "precious\n")
+        self.assertNotIn("../CLAUDE.md", self.manifest.read_text(encoding="utf-8"))
 
     @unittest.skipIf(os.name == "nt", "posix permission bits")
     def test_file_mode_preserved(self):
-        self.claude_md.write_text("x\n")
-        (self.dir / "settings.json").write_text("{}")
+        self.claude_md.write_text("x\n", encoding="utf-8")
+        (self.dir / "settings.json").write_text("{}", encoding="utf-8")
         os.chmod(self.claude_md, 0o640)
         os.chmod(self.dir / "settings.json", 0o600)
         self.run_install("--workflow-size", "small")
@@ -339,7 +339,7 @@ class InstallTests(unittest.TestCase):
         self.claude_md.write_bytes(f"{BEGIN}  \nstale\n{END}\t\nafter\n".encode())
         r = self.run_install()
         self.assertEqual(r.returncode, 0, r.stdout)
-        text = self.claude_md.read_text()
+        text = self.claude_md.read_text(encoding="utf-8")
         self.assertEqual(text.count(BEGIN), 1)
         self.assertNotIn("stale", text)
         self.assertTrue(text.endswith("after\n"))
@@ -347,9 +347,9 @@ class InstallTests(unittest.TestCase):
     def _stale_agent(self, content=b"old agent\n", registered=None):
         self.run_install()
         (self.agents / "old.md").write_bytes(content)
-        data = json.loads(self.manifest.read_text())
+        data = json.loads(self.manifest.read_text(encoding="utf-8"))
         data["agents"]["old.md"] = sha(registered if registered is not None else content)
-        self.manifest.write_text(json.dumps(data))
+        self.manifest.write_text(json.dumps(data), encoding="utf-8")
 
     def test_unshipped_unmodified_removed(self):
         self._stale_agent()
@@ -357,14 +357,14 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("agents/old.md: removed", r.stdout)
         self.assertFalse((self.agents / "old.md").exists())
-        self.assertNotIn("old.md", self.manifest.read_text())
+        self.assertNotIn("old.md", self.manifest.read_text(encoding="utf-8"))
 
     def test_unshipped_modified_conflict_then_force(self):
         self._stale_agent(content=b"edited\n", registered=b"orig\n")
         r = self.run_install()
         self.assertEqual(r.returncode, 1)
         self.assertEqual((self.agents / "old.md").read_bytes(), b"edited\n")
-        self.assertIn("old.md", self.manifest.read_text())
+        self.assertIn("old.md", self.manifest.read_text(encoding="utf-8"))
         (self.agents / "old.md.bak").write_bytes(b"prev")
         r = self.run_install("--force")
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -380,12 +380,12 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         data = (claude / "agents" / "scout.md").read_bytes()
         self.assertEqual(data, b"---\nname: scout\n---\nbody\n")
-        self.assertEqual(json.loads((claude / MANIFEST_NAME).read_text())["agents"]["scout.md"], sha(data))
+        self.assertEqual(json.loads((claude / MANIFEST_NAME).read_text(encoding="utf-8"))["agents"]["scout.md"], sha(data))
         self.assertNotIn(b"\r", (claude / "CLAUDE.md").read_bytes())
 
     def test_dry_run_force_over_conflict(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine")
+        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
         before = self.snapshot()
         r = self.run_install("--dry-run", "--force")
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -394,7 +394,7 @@ class InstallTests(unittest.TestCase):
 
     def test_uninstall_dry_run_byte_identical(self):
         self.run_install("--workflow-size", "small")
-        (self.agents / "scout.md").write_text("edited")
+        (self.agents / "scout.md").write_text("edited", encoding="utf-8")
         before = self.snapshot()
         r = self.run_install("--uninstall", "--dry-run", "--force")
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -424,7 +424,7 @@ class InstallTests(unittest.TestCase):
         self.claude_md.write_bytes(f"  {BEGIN}\nstale\n   {END}\nafter\n".encode())
         r = self.run_install()
         self.assertEqual(r.returncode, 0, r.stdout)
-        text = self.claude_md.read_text()
+        text = self.claude_md.read_text(encoding="utf-8")
         self.assertEqual(text.count(BEGIN), 1)
         self.assertNotIn("stale", text)
         self.assertTrue(text.endswith("after\n"))
@@ -436,12 +436,12 @@ class InstallTests(unittest.TestCase):
                 self.claude_md.write_bytes(content.encode())
                 r = self.run_install()
                 self.assertEqual(r.returncode, 0, r.stdout)
-                self.assertTrue(self.claude_md.read_text().startswith(content + "\n" + BEGIN))
+                self.assertTrue(self.claude_md.read_text(encoding="utf-8").startswith(content + "\n" + BEGIN))
 
     def test_force_symlink_reports_target(self):
         real = self.dir / "elsewhere" / "scout-real.md"
         real.parent.mkdir()
-        real.write_text("foreign")
+        real.write_text("foreign", encoding="utf-8")
         self.agents.mkdir()
         self.link(self.agents / "scout.md", real)
         r = self.run_install("--force")
@@ -449,12 +449,12 @@ class InstallTests(unittest.TestCase):
         self.assertIn(f"symlink target {os.path.realpath(real)} overwritten", r.stdout)
         self.assertTrue((self.agents / "scout.md").is_symlink())
         self.assertEqual(real.read_bytes(), self.src("scout"))
-        self.assertEqual((self.agents / "scout.md.bak").read_text(), "foreign")
-        (real).write_text("edited")
+        self.assertEqual((self.agents / "scout.md.bak").read_text(encoding="utf-8"), "foreign")
+        (real).write_text("edited", encoding="utf-8")
         r = self.run_install("--uninstall", "--force")
         self.assertIn(f"symlink target {os.path.realpath(real)}", r.stdout)
         self.assertFalse((self.agents / "scout.md").is_symlink())
-        self.assertEqual(real.read_text(), "edited")
+        self.assertEqual(real.read_text(encoding="utf-8"), "edited")
 
 
 MANIFEST_NAME = "claude-agent-ladder.manifest.json"

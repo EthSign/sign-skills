@@ -2,6 +2,19 @@
 
 All notable changes to Claude Agent Ladder are documented here.
 
+## Unreleased
+
+### Fixed
+
+- The test suite now reads and writes files as UTF-8. On Windows, Python
+  defaulted to cp1252, garbled the em-dashes in `rules.md`, and failed
+  `test_fresh_install`. The installer was not affected.
+
+### Documentation
+
+- Windows notes in the README and SKILL.md: the `python3` Store stub, and the
+  results of a test run on Windows 11.
+
 ## 1.0.0 - 2026-09-28
 
 ### Added

@@ -20,6 +20,8 @@ The agent ladder has two parts, and the installer manages both:
    python3 "$skill_dir/scripts/install.py"
    ```
 
+   On Windows, `python3` and `python` may be Microsoft Store stubs that print "Python was not found". Use `py -3`, or find a real interpreter (for example one managed by uv) and call it by full path.
+
 2. Read the exit code and report each line of output that is not `unchanged`.
    - `0`: done.
    - `1`: some agent files were skipped because the user modified them or a different file already uses that name. List them and ask before rerunning with `--force`, which keeps a `.bak` copy and replaces them. If a skipped file is a symlink, say that `--force` overwrites the link's target.

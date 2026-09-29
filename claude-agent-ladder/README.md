@@ -54,7 +54,9 @@ tiers, `deep-worker` can also spawn `fast-worker`, and `std-worker` can spawn
 
 - Claude Code 2.1.284 or newer. The agents use model aliases, and older builds
   map `sonnet`, `opus`, and `fable` to older model releases.
-- Python 3.10 or newer (standard library only) to run the installer.
+- Python 3.10 or newer (standard library only) to run the installer. On
+  Windows, `python3` is often only the Microsoft Store stub; run the commands
+  below with `py -3` or the full path to a real interpreter instead.
 - Access to Fable for the `verifier` tier. Without it, change the verifier's
   `model` to `opus` before installing.
 
@@ -69,6 +71,14 @@ Verified on 2026-09-28 with Claude Code 2.1.284 in a Fable session:
 | `verifier` | Fable 5.1 | max |
 | `Explore` (built-in) | Opus 5.5 | medium |
 | `Plan` (built-in) | Fable 5.1 | session effort |
+
+The installer and its test suite were also run on Windows 11 (Git Bash,
+CPython 3.10.21, a checkout with `core.autocrlf=true`) on 2026-09-28. All 39
+tests pass, with 5 skipped: four symlink tests (Windows needs Developer Mode
+or admin rights to create symlinks) and the POSIX file-mode test. A CRLF
+checkout installs LF agent files with the same hashes as a macOS or Linux
+checkout, and an existing CRLF CLAUDE.md keeps its line endings through
+install and uninstall.
 
 ## Installation
 
