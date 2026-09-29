@@ -24,7 +24,7 @@ The agent ladder has two parts, and the installer manages both:
    - `0`: done.
    - `1`: some agent files were skipped because the user modified them or a different file already uses that name. List them and ask before rerunning with `--force`, which keeps a `.bak` copy and replaces them. If a skipped file is a symlink, say that `--force` overwrites the link's target.
    - `2`: an error, such as malformed `claude-agent-ladder` markers or an unclosed code fence in CLAUDE.md, a CLAUDE.md that is not valid UTF-8, or invalid JSON in settings.json. Report the error line. A CLAUDE.md problem is caught before anything is written.
-3. Tell the user that running sessions picked up new agent definitions without a restart in testing, but read CLAUDE.md only at startup. Existing sessions need a restart, or a message asking them to re-read `<claude-dir>/CLAUDE.md`, to follow the new rules.
+3. Tell the user that in testing, running sessions picked up changed models and effort levels without a restart, but tool restrictions and CLAUDE.md rules only at startup. Existing sessions need a restart to get everything. Asking one to re-read `<claude-dir>/CLAUDE.md` covers the rules but not the tool restrictions.
 
 The installer is idempotent. Rerunning it after pulling a newer version of this skill updates every agent file the user has not edited.
 

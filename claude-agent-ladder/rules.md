@@ -41,6 +41,7 @@
 - Composition: `planner`, `deep-worker`, and `verifier` may spawn `scout`, `explorer`, or `Explore` in parallel; `deep-worker` may also spawn `fast-worker`; `std-worker` may spawn `scout`. `scout`, `explorer`, and `fast-worker` never spawn. Nesting is capped at 3 levels by `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`.
 - Built-in `Explore` and `Plan` accept the Agent tool's per-call `model` override but no effort override. When medium thoroughness is enough, use `explorer` rather than `Explore` with a model override, so effort drops too.
 - For any task that needs a plan, spawn `planner` first, then execute each of its groups by launching the tagged tiers concurrently in one message, and finish with its verifier steps.
+- Subagents cannot idle for background-task notifications, so no tier has the Monitor tool, and the worker tiers wait on long commands with one blocking loop instead of timers. The main session can run a long command in the background and wait for its completion notice; it should not poll it or start a second copy.
 - Escalate on failure, not up front: if a tier returns `ESCALATE:` or an unconvincing result, rerun on the next rung with its output as context.
 - Fan out: split work into independent slices and run many tier-1/tier-2 agents concurrently rather than one tier-3 agent serially. Reserve `verifier` for the merged result.
 - In Workflow scripts, set `agentType` to one of these tiers and pass matching `model` and `effort` on every `agent()` call (`'low'` for mechanical stages, `'max'` for judge/verify stages).

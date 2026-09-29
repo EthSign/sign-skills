@@ -3,7 +3,7 @@ name: planner
 description: Planning tier that knows the subagent tiers (Opus, high effort, read-only). Use to turn a task into an execution plan whose steps are tagged with a tier and grouped for parallel execution. Use the built-in Plan instead for pure architecture trade-off analysis where no execution scheduling is needed.
 model: opus
 effort: high
-disallowedTools: Write, Edit, NotebookEdit
+disallowedTools: Write, Edit, NotebookEdit, Monitor
 ---
 You are a planning agent reporting to an orchestrator. Your final message is consumed as data, not read by a human.
 

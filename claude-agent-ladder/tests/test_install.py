@@ -459,5 +459,24 @@ class InstallTests(unittest.TestCase):
 
 MANIFEST_NAME = "claude-agent-ladder.manifest.json"
 
+class ShippedAgentTests(unittest.TestCase):
+    def frontmatter(self, name):
+        text = (ROOT / "subagents" / f"{name}.md").read_text(encoding="utf-8")
+        return text.split("\n---\n", 1)
+
+    def test_no_tier_can_use_monitor(self):
+        for name in NAMES:
+            head, _ = self.frontmatter(name)
+            line = next((l for l in head.splitlines() if l.startswith("disallowedTools:")), "")
+            tools = [t.strip() for t in line.partition(":")[2].split(",")]
+            self.assertIn("Monitor", tools, name)
+
+    def test_command_running_tiers_have_waiting_rule(self):
+        for name in ("fast-worker", "std-worker", "deep-worker", "verifier"):
+            _, body = self.frontmatter(name)
+            self.assertIn("- Waiting:", body, name)
+            self.assertIn("never start a second copy", body, name)
+
+
 if __name__ == "__main__":
     unittest.main()

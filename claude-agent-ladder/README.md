@@ -40,6 +40,12 @@ Why these choices:
   consistency, but Claude Code sends no effort setting to Haiku 4.5, so it has
   no effect there.
 
+- **No tier can use Monitor.** A subagent that ends its turn ends its task, so it
+  cannot wait for a background notification. Without this, a worker can arm
+  timer after timer and start duplicate test runs. The worker tiers instead
+  give long commands a long enough timeout, wait with one blocking loop, and
+  never start a second copy of a command that is still running.
+
 Tiers may nest: `planner`, `deep-worker`, and `verifier` can spawn the search
 tiers, `deep-worker` can also spawn `fast-worker`, and `std-worker` can spawn
 `scout`. `scout`, `explorer`, and `fast-worker` cannot spawn agents.
@@ -108,10 +114,11 @@ not UTF-8, the installer stops with status 2 before writing anything.
 | `--claude-dir PATH` | Target another Claude config directory. Defaults to `$CLAUDE_CONFIG_DIR`, then `~/.claude`. |
 | `--uninstall` | Remove the unmodified agents, the rules block, and the manifest. |
 
-In testing with Claude Code 2.1.284, running sessions picked up new agent
-definitions without a restart. Sessions read CLAUDE.md only at startup, so
-restart them, or ask them to re-read `~/.claude/CLAUDE.md`, before they follow
-the new rules.
+In testing with Claude Code 2.1.284, running sessions picked up changed models
+and effort levels without a restart, but changed tool restrictions took effect
+only in new sessions. Sessions also read CLAUDE.md only at startup. Restart
+running sessions to get everything; asking one to re-read `~/.claude/CLAUDE.md`
+covers the rules but not the tool restrictions.
 
 ## Updating
 
