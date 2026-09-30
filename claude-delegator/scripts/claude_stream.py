@@ -37,7 +37,7 @@ _RESPONSE_FIELDS = (
 )
 
 
-def _metadata(native: bool, exit_code: int | None, timed_out: bool) -> dict[str, Any]:
+def _metadata(native: bool, collab: bool, exit_code: int | None, timed_out: bool) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "status": "unclassified",
         "exit_code": exit_code,
@@ -57,7 +57,7 @@ def _metadata(native: bool, exit_code: int | None, timed_out: bool) -> dict[str,
         "metadata_collection_error": None,
         "output_format": "stream-json",
         "response_protocol": (
-            "claude-native-code-review-v1" if native else "findings-first-completion-v3"
+            "claude-native-code-review-v1" if native else "collab-turn-v1" if collab else "findings-first-completion-v3"
         ),
         "completion_marker": None,
         "native_review_completed": False,
@@ -224,18 +224,21 @@ def parse_stream(
     path: Path,
     *,
     native: bool,
+    collab: bool = False,
     exit_code: int | None,
     timed_out: bool = False,
     snapshot: Path | None = None,
     evidence: Path | None = None,
 ) -> dict[str, Any]:
-    """Parse a Claude JSONL stream and classify its terminal review state.
+    """Parse a Claude JSONL stream and classify its terminal response state.
 
-    ``complete`` means the review itself is complete.  It is false for every
-    failure and for a valid ``MORE_FINDINGS_REMAIN`` overflow response.
+    ``complete`` means the selected response protocol is complete. It is false
+    for every failure and for a valid ``MORE_FINDINGS_REMAIN`` overflow response.
     """
 
-    metadata = _metadata(native, exit_code, timed_out)
+    if native and collab:
+        raise ValueError("Collab cannot be combined with native review")
+    metadata = _metadata(native, collab, exit_code, timed_out)
     response: dict[str, Any] | None = None
     latest_assistant = ""
     partial_parts: list[str] = []
@@ -416,6 +419,11 @@ def parse_stream(
         metadata["partial_output_recovered"] = bool(result)
         return {"response": response, "result": result, "complete": False, "metadata": metadata}
 
+    if collab and not positive_usage:
+        metadata["status"] = "collab_no_model_usage"
+        metadata["partial_output_recovered"] = bool(result)
+        return {"response": response, "result": result, "complete": False, "metadata": metadata}
+
     if native:
         if not isinstance(protocol, str) or not protocol.strip():
             metadata["status"] = "native_review_empty"
@@ -433,6 +441,21 @@ def parse_stream(
     for protocol_line in protocol.split("\n"):
         if protocol_line.strip():
             last_protocol_line = protocol_line.removesuffix("\r")
+    if collab:
+        if last_protocol_line != "COLLAB_TURN_COMPLETE":
+            if last_protocol_line == "COLLAB_TURN_INCOMPLETE":
+                metadata["completion_marker"] = "COLLAB_TURN_INCOMPLETE"
+            metadata["status"] = "collab_incomplete"
+            metadata["partial_output_recovered"] = bool(protocol)
+            return {"response": response, "result": result, "complete": False, "metadata": metadata}
+        body = protocol.rsplit("COLLAB_TURN_COMPLETE", 1)[0]
+        if not body.strip() or all(line.strip() in ("", "COLLAB_TURN_INCOMPLETE", "COLLAB_TURN_COMPLETE") for line in body.splitlines()):
+            metadata["status"] = "collab_empty"
+            metadata["partial_output_recovered"] = bool(protocol)
+            return {"response": response, "result": result, "complete": False, "metadata": metadata}
+        metadata["completion_marker"] = "COLLAB_TURN_COMPLETE"
+        metadata["status"] = "success_collab"
+        return {"response": response, "result": result, "complete": True, "metadata": metadata}
     if last_protocol_line == "MORE_FINDINGS_REMAIN":
         metadata["completion_marker"] = "MORE_FINDINGS_REMAIN"
         metadata["overflow_reported"] = True

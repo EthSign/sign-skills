@@ -2,6 +2,28 @@
 
 All notable changes to Claude Delegator are documented here.
 
+## 8.1.0 - 2026-09-30
+
+### Added
+
+- Added opt-in Collab mode to the shared Python review runner. Conversation
+  turns are bounded, prompt-only, and tool-free; a completion marker ends a
+  turn but does not establish agreement.
+- Added the collaboration workflow in `references/collab.md`: Codex and Claude
+  agree on the full plan and one executor before substantive work, re-agree
+  after material changes, and have the other model review the result.
+- Added a separate Python 3.10+ Claude executor helper with `--restricted` and
+  `--safe-mode` controls. It binds an agreement receipt hash to the full plan,
+  executor, declared paths, and validation, and confines declared writes to an
+  isolated temporary workspace for Codex to review, test, and integrate.
+- Added offline executor coverage in `tests/test_executor.py`.
+
+### Unchanged
+
+- Advisory review remains the default and read-only, with the moving Fable
+  model alias and high effort. The Python runner retains its existing recovery,
+  limits, and platform requirements.
+
 ## 8.0.0 - 2026-09-17
 
 ### Changed
