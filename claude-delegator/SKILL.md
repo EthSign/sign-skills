@@ -1,11 +1,15 @@
 ---
 name: claude-delegator
-description: Delegate bounded analysis and code-review tasks to the installed Claude Code CLI for an independent, read-only second opinion. Use when the user asks Codex to ask Claude, compare another model's assessment, or have Claude review code or a diff. Do not use for tasks that require Claude to edit files or perform external actions.
+description: Use Claude Code for an independent advisory review, or use collab mode to have Codex and Claude discuss and agree on a plan and executor before work begins. Use when the user asks to ask Claude, compare assessments, review code, or collaborate with Claude.
 ---
 
 # Claude Delegator
 
-Use Claude Code as an advisory reviewer. Codex remains responsible for the task, verifies Claude's claims independently, and decides what to present or implement.
+Choose the mode from the user's request. **Advisory mode** is the existing default: Claude gives an independent, read-only second opinion and Codex decides what to present or implement. **Collab mode** is selected when the user asks for collab mode or joint discussion and agreement with Claude. Read [references/collab.md](references/collab.md) for that mode before starting substantive work.
+
+In collab mode, discuss every substantive decision, agree on the exact plan and one executor (Codex or Claude), then execute. Claude may edit an isolated workspace through the separate executor helper; Codex reviews and integrates the result. Agreement between models does not expand the user's scope or grant permission for external actions. Keep advisory review as the default when collab mode was not requested.
+
+The remaining sections describe advisory mode and its read-only runner. Collab conversation turns reuse its bounded-analysis transport with `--collab` on every platform; their response protocol and Claude execution workflow are defined in the linked reference.
 
 The entrypoint is `scripts/invoke-claude.py` (Python 3.10+, standard library). Invoke it directly with the same kebab-case arguments on every OS. Keep run artifacts outside the reviewed repository.
 
@@ -41,14 +45,14 @@ The entrypoint is `scripts/invoke-claude.py` (Python 3.10+, standard library). I
        --prompt-file <absolute-prompt-file>
    ```
 
-   For bounded non-repository analysis, pass `--run-directory`, omit the revision parameters and `--review-working-tree`, and include the necessary evidence in the prompt. The runner does not install Python. The current implementation targets Linux and macOS but has been tested only on Windows in this release. Windows requires a native Claude executable rather than an npm `.cmd`/`.bat` shim; POSIX accepts an executable Claude command or path. A real Claude call requires outbound network access; request the normal shell escalation when Codex networking is sandboxed without weakening Claude's restrictions.
+   For bounded non-repository analysis, pass `--run-directory`, omit the revision parameters and `--review-working-tree`, and include the necessary evidence in the prompt. The runner does not install Python. The Python runner targets Linux and macOS as well as Windows; the 8.0.0 migration was tested on Windows, and current changes have offline macOS validation. Live collab calls and current Windows/Linux execution remain unverified. Windows requires a native Claude executable rather than an npm `.cmd`/`.bat` shim; POSIX accepts an executable Claude command or path. A real Claude call requires outbound network access; request the normal shell escalation when Codex networking is sandboxed without weakening Claude's restrictions.
 
    Invoke the wrapper as a directly tracked long-running shell command. If the first shell response contains a live `session_id`, retain it and poll that exact session with the shell's stdin/poll operation until it exits. A missing `exit_code` in the first response means the command is still running, not that it failed. Do not place the shell call inside orchestration code that emits only selected response fields, and do not use an outer task-wait primitive in place of polling the returned shell session.
 
    The default is the moving `fable` alias at `high` effort. Select a different model for a run with `--model <alias-or-full-model-id>` when requested; for example, `--model opus`, `--model sonnet`, or `--model claude-fable-5-1`. Omitting `--model` uses Fable. Pass the selected value through to Claude Code without rewriting it or silently falling back to another model. Keep effort at `high` unless the user requests otherwise. There is no model-turn limit, output-token override, thinking-disable override, finding-count limit, or automatic retry. A 30-minute wall-clock timeout is the last-resort process guard.
 4. If the shell session is lost, interrupted, or otherwise cannot be polled, inspect `status.json`, `result.json`, and `metadata.json` in the preserved run directory before deciding anything about the review. If either `claude_start_attempted` or `claude_started` is true, never retry automatically. If the status is terminal, recover the result there. If it says `running`, check the recorded PID and wait for the existing run. If the PID is gone without a terminal result, report the review as incomplete. Only a deterministic preflight state with both start flags false may be corrected and rerun once against unchanged scope.
 5. Treat Claude's response as an independent opinion. Reproduce every actionable claim against the exact target. Reject style-only noise, unreachable scenarios, claims about superseded revisions, and claims unsupported by the code.
-6. Report which conclusions Codex confirmed, rejected, or could not verify, and include the run-directory path with the compact diagnostic metadata. Claude is read-only and never makes repository changes.
+6. Report which conclusions Codex confirmed, rejected, or could not verify, and include the run-directory path with the compact diagnostic metadata. Claude is read-only in advisory mode and never makes repository changes through the review runner.
 
 Requested models are recorded in diagnostic metadata; `model_usage` reports models returned by Claude when available. For a large, quoted, or multiline prompt, use `--prompt-file <path>` instead of the mutually exclusive `--prompt` option.
 
@@ -104,4 +108,4 @@ Persistent artifact-write failures make the run incomplete and may leave stale f
 
 The wrapper enforces empty user/project/local setting sources, disabled auto-memory, `--permission-mode dontAsk`, an explicitly empty MCP configuration, no Chrome, no session persistence, no prompt suggestions, no internal API retries, streamed JSON, exact-snapshot isolation, and a wall-clock timeout. Bounded non-repository analysis disables all tools and slash commands. Repository reviews permit only the bundled `/code-review` workflow and the `Read`, `Glob`, and `Grep` catalog it needs, while explicitly denying Bash, PowerShell, edit, and network tools.
 
-Never replace these controls with `--dangerously-skip-permissions`, `bypassPermissions`, `acceptEdits`, `auto`, Bash, editing tools, inherited MCP servers, plugins, hooks, browser access, or unrestricted repository access. If the requested work needs mutation or external access, stop and ask the user to authorize a separate workflow.
+Never widen the review runner's controls with `--dangerously-skip-permissions`, `bypassPermissions`, `acceptEdits`, `auto`, Bash, editing tools, inherited MCP servers, plugins, hooks, browser access, or unrestricted repository access. For file edits in requested collab mode, use the separate, jointly agreed executor workflow in [references/collab.md](references/collab.md). It permits Claude to edit an isolated copy within the task's existing authorization. Other mutation or external access requires an appropriately scoped workflow and any authorization that is still missing; do not request approval again for work the user already authorized.

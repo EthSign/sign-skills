@@ -7,7 +7,7 @@ Reusable internal Codex and Claude Code skills for Sign projects.
 | Skill | Purpose |
 | --- | --- |
 | [`architecture-diagram`](architecture-diagram/) | Creates polished dark-themed system, infrastructure, cloud, security, and network diagrams as self-contained HTML with inline SVG. |
-| [`claude-delegator`](claude-delegator/) | Asks an installed Claude Code CLI for an independent, read-only second opinion on bounded analysis or code review tasks. |
+| [`claude-delegator`](claude-delegator/) | Uses an installed Claude Code CLI for independent, read-only advisory reviews by default, or an opt-in collaboration where Codex and Claude agree on a plan and one executor before substantive work. |
 | [`codex-agent-ladder`](codex-agent-ladder/) | Automatically routes substantial Codex work among tiered subagents with bounded escalation and separate verification; its installer enables the routing. |
 | [`codex-delegator`](codex-delegator/) | Lets Claude Code ask the installed Codex CLI for an independent, read-only review of code changes or plans. |
 | [`sign-slide-design`](sign-slide-design/) | Creates, redesigns, and reviews presentation decks against the official Sign deck design system. |
