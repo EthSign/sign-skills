@@ -76,7 +76,7 @@ class ExecutorTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def invoke(self, mode="success", extra_env=None):
+    def invoke(self, mode="success", extra_env=None, extra=()):
         path = self.root / "agreement.json"
         path.write_text(json.dumps(self.agreement))
         env = dict(os.environ, MOCK_MODE=mode)
@@ -102,7 +102,7 @@ class ExecutorTests(unittest.TestCase):
              patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = executor.main(["--source-directory", str(self.source), "--agreement-file", str(path),
                 "--run-directory", str(self.root / "run"), "--claude-path", sys.executable,
-                "--max-runtime-minutes", "0.05"])
+                "--max-runtime-minutes", "0.05", *extra])
         return subprocess.CompletedProcess([], code, out.getvalue(), err.getvalue())
 
     def test_success_isolated_and_original_unchanged(self):
@@ -114,8 +114,14 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(list(changes), ["editable.txt"])
         self.assertFalse(json.loads((self.root / "run/result.json").read_text())["tests_verified"])
         command = self.commands[0]
-        self.assertEqual(command[command.index("--model") + 1], "fable")
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5-5")
         self.assertEqual(command[command.index("--effort") + 1], "high")
+
+    def test_explicit_model_override_is_forwarded(self):
+        result = self.invoke(extra=["--model", "fable"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = self.commands[0]
+        self.assertEqual(command[command.index("--model") + 1], "fable")
 
     def test_api_override_keeps_cap(self):
         result = self.invoke("budget", {"ANTHROPIC_API_KEY": "mock-not-a-secret"})

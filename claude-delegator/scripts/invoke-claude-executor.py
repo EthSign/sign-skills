@@ -12,7 +12,7 @@ import tempfile
 from datetime import datetime, timezone
 from claude_process import cleanup_signals, resolve_on_path, run_capture, stop_child
 
-VERSION = "8.1.0"
+VERSION = "8.1.1"
 TOOLS = "Read,Glob,Grep,Edit,Write"
 DENIED = "Bash,PowerShell,NotebookEdit,WebFetch,WebSearch"
 PROPOSAL_FIELDS = ("plan_id", "objective", "plan", "executor", "write_paths", "read_paths", "validation")
@@ -83,7 +83,7 @@ def main(argv=None):
     parser.add_argument("--run-directory")
     parser.add_argument("--print-agreement-hash", metavar="FILE", help="Hash a proposal without starting Claude")
     parser.add_argument("--claude-path")
-    parser.add_argument("--model", default="fable")
+    parser.add_argument("--model", default="claude-opus-5-5")
     parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="high")
     parser.add_argument("--max-budget-usd", type=float, default=0.50)
     parser.add_argument("--max-runtime-minutes", type=float, default=30)

@@ -21,7 +21,7 @@ from claude_snapshot import Snapshot, sha256
 from claude_stream import parse_stream
 from claude_process import ProcessCleanupError, cleanup_signals, resolve_on_path, run_capture, stop_child
 
-VERSION = "8.1.0"
+VERSION = "8.1.1"
 DENIED_TOOLS = ["Bash", "PowerShell", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
 REQUIRED_FLAGS = ("--setting-sources", "--no-session-persistence", "--permission-mode", "--tools",
                   "--allowedTools", "--disallowedTools", "--mcp-config", "--strict-mcp-config",
@@ -156,7 +156,7 @@ def arguments(argv=None):
     p.add_argument("--review-working-tree", action="store_true")
     p.add_argument("--collab", action="store_true", help="Bounded non-repository peer dialogue")
     p.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="high")
-    p.add_argument("--model", default="fable")
+    p.add_argument("--model", default="claude-opus-5-5")
     p.add_argument("--max-budget-usd", type=float, default=0.50)
     p.add_argument("--max-runtime-minutes", type=float, default=30)
     p.add_argument("--max-evidence-bytes", type=int, default=64 * 1024 * 1024)

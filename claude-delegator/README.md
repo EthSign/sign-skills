@@ -250,7 +250,7 @@ not store the prompt or authentication identity.
 
 ## Defaults and limits
 
-- Model: moving `fable` alias; override per run with `--model opus` on any platform (aliases and full model IDs are accepted).
+- Model: Claude Opus 5.5 (`claude-opus-5-5`); override per run with `--model fable` on any platform (aliases and full model IDs are accepted).
 - Effort: `high`
 - Maximum runtime: 30 minutes
 - Evidence ceiling: 64 MiB

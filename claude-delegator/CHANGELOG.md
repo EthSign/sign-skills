@@ -2,6 +2,15 @@
 
 All notable changes to Claude Delegator are documented here.
 
+## 8.1.1 - 2026-09-30
+
+### Changed
+
+- Default advisory reviews, collab conversation turns, and isolated Claude
+  execution to Claude Opus 5.5 using the explicit `claude-opus-5-5` model ID.
+- Keep `high` effort and explicit per-run model overrides; Fable remains
+  available through `--model fable` or a full model ID.
+
 ## 8.1.0 - 2026-09-30
 
 ### Added

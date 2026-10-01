@@ -88,10 +88,11 @@ class RunnerTests(unittest.TestCase):
         code, meta, result, out = self.invoke()
         self.assertEqual(code, 0)
         self.assertTrue(result["review_complete"])
-        self.assertEqual(meta["model"], "fable")
+        self.assertEqual(meta["model"], "claude-opus-5-5")
         self.assertEqual(meta["effort"], "high")
         self.assertTrue(meta["sandbox_cleanup_succeeded"])
         cmd = self.commands[0]
+        self.assertEqual(cmd[cmd.index("--model") + 1], meta["model"])
         for flag in ("--tools=", "--disable-slash-commands", "--setting-sources=", "--strict-mcp-config", "--no-chrome", "--no-session-persistence"):
             self.assertIn(flag, cmd)
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
@@ -103,8 +104,8 @@ class RunnerTests(unittest.TestCase):
     def test_collab_uses_neutral_prompt_and_existing_safety(self):
         code, meta, result, out = self.invoke("collab_success", ["--collab"])
         self.assertEqual(code, 0, meta)
-        self.assertEqual(meta["wrapper_version"], "8.1.0")
-        self.assertEqual(meta["model"], "fable")
+        self.assertEqual(meta["wrapper_version"], "8.1.1")
+        self.assertEqual(meta["model"], "claude-opus-5-5")
         self.assertEqual(meta["effort"], "high")
         self.assertEqual(meta["review_scope"], "bounded-collab")
         self.assertEqual(meta["response_protocol"], "collab-turn-v1")
@@ -114,6 +115,7 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(result["review_complete"])
         self.assertIn("Codex should execute the next step", out)
         command = self.commands[0]
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5-5")
         for flag in ("--tools=", "--disable-slash-commands", "--setting-sources=", "--strict-mcp-config", "--no-chrome", "--no-session-persistence"):
             self.assertIn(flag, command)
         self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
@@ -157,6 +159,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["delegation_metadata"]["model"], "opus")
         cmd = self.commands[0]
+        self.assertEqual(cmd[cmd.index("--model") + 1], meta["model"])
         self.assertEqual(cmd[cmd.index("--max-budget-usd") + 1], "1.2500")
 
     def test_failures_and_partial_output(self):
@@ -220,7 +223,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(meta["diff_sha256"], meta["evidence_patch_sha256"])
         self.assertEqual(before, self.git(repo, "status", "--porcelain"))
         self.assertEqual(meta["status"], "success_native_review")
+        self.assertEqual(meta["model"], "claude-opus-5-5")
         cmd = self.commands[0]
+        self.assertEqual(cmd[cmd.index("--model") + 1], meta["model"])
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Glob,Grep")
         self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Read,Glob,Grep")
         self.assertEqual(cmd[cmd.index("--disallowedTools") + 1], ",".join(runner.DENIED_TOOLS))
