@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Agent Ladder"
+  short_description: "Claude Code only: tiered subagents by model and effort"
+  default_prompt: "Use $claude-agent-ladder to install or update the tiered Claude Code subagents and their routing rules."
