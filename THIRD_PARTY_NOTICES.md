@@ -18,3 +18,10 @@
 - New local implementation for Claude Code-to-Codex review delegation, following the recovery and scope conventions of the adjacent Claude Delegator skill.
 - The Python runner and tests are newly implemented, not a copied third-party bridge or SDK. No additional third-party runtime package or license grant is introduced.
 - Protocol and installation references are linked in [`codex-delegator/README.md`](codex-delegator/README.md).
+
+## Codex Agent Ladder
+
+- New local implementation of tiered Codex delegation, inspired by the adjacent Claude Agent Ladder proposal.
+- The Codex profiles, routing instructions, installer, and tests were implemented for this skill. No copied third-party bridge, SDK, runtime package, or additional license grant is introduced.
+- Configuration, installation, and validation references are linked in [`codex-agent-ladder/README.md`](codex-agent-ladder/README.md).
+

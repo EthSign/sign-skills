@@ -1,12 +1,17 @@
 # Claude Delegator
 
-Claude Delegator is a cross-platform Codex skill that asks an installed Claude
-Code CLI for an independent, read-only second opinion. It supports bounded
-analysis, exact commit-range reviews, and frozen working-tree reviews.
+Claude Delegator is a cross-platform Codex skill with two modes. **Advisory** is
+the default: it asks an installed Claude Code CLI for an independent, read-only
+second opinion on bounded analysis, exact commit ranges, or frozen working-tree
+changes. **Collab** is opt-in: Codex and Claude discuss a full plan and agree on
+one executor before substantive work starts.
 
-Claude is advisory: Codex remains responsible for reproducing the findings,
-rejecting unsupported claims, and deciding what to present or change. The
-authoritative agent instructions are in [`SKILL.md`](SKILL.md).
+In Advisory mode, Codex remains responsible for reproducing the findings,
+rejecting unsupported claims, and deciding what to present or change. In
+Collab mode, material plan changes require another agreement; the model that
+does not execute reviews the result. The authoritative agent instructions are
+in [`SKILL.md`](SKILL.md), with the collaboration procedure in
+[`references/collab.md`](references/collab.md).
 Release history is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Platform support
@@ -15,9 +20,10 @@ Release history is in [`CHANGELOG.md`](CHANGELOG.md).
 | --- | --- | --- |
 | Any platform | `scripts/invoke-claude.py` | Python 3.10+ |
 
-The Python implementation is shared across platforms. Linux and macOS are
-targeted, but this release has been tested only on Windows. Invoke an installed
-Python 3.10+ interpreter directly; no shell launcher or runtime installer is used.
+The Python implementation is shared across platforms. The 8.0.0 migration was
+tested on Windows; Linux and macOS are targeted by the same entrypoint. Invoke
+an installed Python 3.10+ interpreter directly; no shell launcher or runtime
+installer is used.
 
 ## Requirements
 
@@ -51,7 +57,7 @@ directory. The Python scripts do not need executable permissions when invoked
 through Python.
 
 Whether installed automatically or manually, keep `SKILL.md`, `agents/`,
-`scripts/`, and `tests/` together.
+`references/`, `scripts/`, and `tests/` together.
 
 ## Use from Codex
 
@@ -70,9 +76,19 @@ between <base commit> and <head commit>.
 Use $claude-delegator to analyze this design question: <question and evidence>.
 ```
 
+To opt into Collab mode, ask for a joint plan and identify the work:
+
+```text
+Use $claude-delegator in collab mode to plan and implement <bounded task>.
+Discuss the constraints and evidence with Claude, agree on the full plan and
+whether Codex or Claude will execute it, then have the other model review.
+```
+
 Codex follows [`SKILL.md`](SKILL.md), invokes the Python entrypoint, retains
 the run directory, waits for the single Claude invocation, and independently
-checks actionable findings.
+checks actionable findings in Advisory mode. Collab may require several bounded
+conversation turns before execution; the completion marker means a turn ended,
+not that the models agreed.
 
 ## Direct runner usage
 
@@ -83,6 +99,25 @@ python3 scripts/invoke-claude.py --working-directory /absolute/path/to/repo \
   --review-working-tree --run-directory /absolute/path/outside/repo/review-001 \
   --prompt "Review the current changes for regressions."
 ```
+
+Use `--collab` for a bounded, prompt-only conversation turn. It cannot be
+combined with `--base-revision`, `--head-revision`, or `--review-working-tree`:
+
+```bash
+python3 scripts/invoke-claude.py --collab \
+  --run-directory /absolute/path/to/new-run-directory \
+  --prompt "Assess this plan, constraints, evidence, and executor choice: ..."
+```
+
+When Claude is the agreed executor, Codex uses the separate Python 3.10+
+`scripts/invoke-claude-executor.py` helper with both `--restricted` and
+`--safe-mode` controls. Discussion remains prompt-only and tool-free. The
+execution helper binds an agreement receipt hash to the full plan, executor,
+declared output paths, and validation, then gives Claude an isolated temporary
+workspace to write only the declared files. Codex reviews and tests those
+outputs before integrating them. This does not change the read-only Advisory
+review runner; see [`references/collab.md`](references/collab.md) for the full
+workflow.
 
 Use `python`, `py -3`, or an absolute Python executable path where appropriate.
 Run artifacts must live outside the reviewed repository to avoid reviewing the
@@ -177,8 +212,9 @@ The runner also enforces:
 - streamed-result validation and authentication-aware budget handling;
 - trap/finally-based process, worktree, and temporary-directory cleanup.
 
-The runner never asks Claude to edit code, post comments, or perform external
-actions.
+The Advisory runner never asks Claude to edit code, post comments, or perform
+external actions. Collab conversation turns use the same no-tools isolation;
+agreed Claude execution uses the separate helper described above.
 
 ## Results and recovery
 
@@ -195,9 +231,12 @@ Every run directory, whether supplied or generated, contains:
 - `metadata.json` — scope, evidence hashes, usage, timing, and safety metadata.
 
 These files are the recovery source if the controlling shell session is lost.
-Failed reviews return nonzero and preserve any safely recovered evidence.
+Failed runs return nonzero and preserve any safely recovered evidence.
 `MORE_FINDINGS_REMAIN` returns zero with `review_complete=false`; it is valid
 partial output, not a clean or exhaustive review.
+In Collab mode, `COLLAB_TURN_COMPLETE` closes a successful conversation turn;
+`COLLAB_TURN_INCOMPLETE` and missing or invalid markers remain incomplete. The
+legacy `review_complete` field describes transport completion, not agreement.
 An empty repository scope returns zero with terminal `no_changes` and
 `review_complete=true` without starting Claude. A dry run also returns zero
 after preflight, but remains `review_complete=false` because no review ran.
@@ -211,7 +250,7 @@ not store the prompt or authentication identity.
 
 ## Defaults and limits
 
-- Model: moving `fable` alias; override per run with `--model opus` on any platform (aliases and full model IDs are accepted).
+- Model: Claude Opus 5.5 (`claude-opus-5-5`); override per run with `--model fable` on any platform (aliases and full model IDs are accepted).
 - Effort: `high`
 - Maximum runtime: 30 minutes
 - Evidence ceiling: 64 MiB
@@ -230,6 +269,6 @@ Run the portable Python suite on any supported platform:
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The Python suite uses fake children and disposable Git repositories; it makes
-no model or network calls. See
+The Python suite includes `tests/test_executor.py`, uses fake children and
+disposable Git repositories, and makes no model or network calls. See
 [`SKILL.md`](SKILL.md) for the authoritative delegation and review contract.

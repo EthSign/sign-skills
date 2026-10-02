@@ -21,7 +21,7 @@ from claude_snapshot import Snapshot, sha256
 from claude_stream import parse_stream
 from claude_process import ProcessCleanupError, cleanup_signals, resolve_on_path, run_capture, stop_child
 
-VERSION = "8.0.0"
+VERSION = "8.1.1"
 DENIED_TOOLS = ["Bash", "PowerShell", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
 REQUIRED_FLAGS = ("--setting-sources", "--no-session-persistence", "--permission-mode", "--tools",
                   "--allowedTools", "--disallowedTools", "--mcp-config", "--strict-mcp-config",
@@ -39,6 +39,16 @@ The final non-empty line must be REVIEW_COMPLETE only when all findings were inc
 MORE_FINDINGS_REMAIN only when a platform output limit prevented completion. If none, return:
 No actionable findings
 REVIEW_COMPLETE"""
+COLLAB_PROMPT = """You are a peer collaborating with Codex on the concrete objective in the user message.
+Discuss the plan, constraints, evidence, and any material disagreement candidly. State whether
+Codex or Claude is the better executor for the next concrete step and why. Do not assent
+automatically. When instructed, you may author agreed artifacts or patches in your response
+for Codex to inspect and apply. You have no tools; do not claim to have inspected files or
+executed work beyond the supplied evidence. Do not reveal private reasoning.
+
+Finish with COLLAB_TURN_COMPLETE as the exact final non-empty line only when your response
+is complete. If you cannot finish, use COLLAB_TURN_INCOMPLETE as the exact final non-empty
+line. These markers report transport completion, never agreement with a plan."""
 
 
 class NoChanges(Exception):
@@ -144,8 +154,9 @@ def arguments(argv=None):
     p.add_argument("--base-revision")
     p.add_argument("--head-revision")
     p.add_argument("--review-working-tree", action="store_true")
+    p.add_argument("--collab", action="store_true", help="Bounded non-repository peer dialogue")
     p.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="high")
-    p.add_argument("--model", default="fable")
+    p.add_argument("--model", default="claude-opus-5-5")
     p.add_argument("--max-budget-usd", type=float, default=0.50)
     p.add_argument("--max-runtime-minutes", type=float, default=30)
     p.add_argument("--max-evidence-bytes", type=int, default=64 * 1024 * 1024)
@@ -160,6 +171,8 @@ def arguments(argv=None):
 
 
 def validate(args):
+    if args.collab and (args.base_revision is not None or args.head_revision is not None or args.review_working_tree):
+        raise ValueError("--collab cannot be combined with revisions or --review-working-tree")
     for name, low, high in (("max_budget_usd", .05, 100), ("max_runtime_minutes", .05, 60),
                             ("max_evidence_bytes", 1024 * 1024, 256 * 1024 * 1024),
                             ("max_untracked_files", 0, 10000), ("git_command_timeout_seconds", 5, 600),
@@ -206,7 +219,7 @@ def run(args):
             "status": "preflight", "claude_start_attempted": False, "claude_started": False,
             "claude_process_id": None, "review_complete": False, "model": args.model, "effort": args.effort,
             "working_directory": str(args.working_directory.resolve()), "native_code_review": native,
-            "review_scope": "bounded-analysis", "tools": ["Read", "Glob", "Grep"] if native else "none",
+            "review_scope": "bounded-collab" if args.collab else "bounded-analysis", "tools": ["Read", "Glob", "Grep"] if native else "none",
             "disallowed_tools": DENIED_TOOLS if native else "none", "safe_mode": True, "setting_sources": "none",
             "auto_memory": "disabled", "strict_mcp_config": True, "max_turns": None, "max_output_tokens_override": None,
             "adaptive_reasoning": "controlled by effort", "prompt_suggestions": "disabled", "api_retries": 0,
@@ -259,8 +272,10 @@ def run(args):
             analysis_root = Path(tempfile.mkdtemp(prefix="claude-delegator-analysis-")).resolve()
             workdir = analysis_root / "work"
             workdir.mkdir()
-            effective_prompt = "Review objective:\n" + prompt + "\n\nAuthoritative scope: bounded analysis; all evidence is in the objective."
-            meta.update(input_transport="prompt-only-no-tools", response_protocol="findings-first-completion-v3")
+            effective_prompt = (prompt if args.collab else
+                                "Review objective:\n" + prompt + "\n\nAuthoritative scope: bounded analysis; all evidence is in the objective.")
+            meta.update(input_transport="prompt-only-no-tools",
+                        response_protocol="collab-turn-v1" if args.collab else "findings-first-completion-v3")
         command = [executable, "--print", "--setting-sources=", "--permission-mode", "dontAsk", "--strict-mcp-config",
                    "--mcp-config", '{"mcpServers":{}}', "--no-chrome", "--no-session-persistence", "--prompt-suggestions", "false",
                    "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--effort", args.effort, "--model", args.model]
@@ -276,7 +291,7 @@ def run(args):
             command += ["--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep", "--disallowedTools", ",".join(DENIED_TOOLS),
                         "--append-system-prompt-file", str(guidance_file)]
         else:
-            command += ["--tools=", "--disable-slash-commands", "--system-prompt", BOUNDED_PROMPT]
+            command += ["--tools=", "--disable-slash-commands", "--system-prompt", COLLAB_PROMPT if args.collab else BOUNDED_PROMPT]
         if meta["budget_cap_applied"]:
             command += ["--max-budget-usd", f"{args.max_budget_usd:.4f}"]
         meta["total_input_bytes"] = len(effective_prompt.encode())
@@ -306,7 +321,7 @@ def run(args):
                         meta["process_cleanup_error"] = str(exc)
                         raise
                 meta["exit_code"] = child.returncode
-            parsed = parse_stream(directory / "stream.jsonl", native=native, exit_code=child.returncode,
+            parsed = parse_stream(directory / "stream.jsonl", native=native, collab=args.collab, exit_code=child.returncode,
                                   timed_out=meta["timed_out"], snapshot=snapshot.path, evidence=snapshot.evidence)
             response, review = parsed["response"], parsed["result"]
             meta.update(parsed["metadata"], review_complete=parsed["complete"])
@@ -336,7 +351,7 @@ def run(args):
                         meta["stdin_cleanup_error"] = str(exc)
                 if response is None and child.poll() is not None and (directory / "stream.jsonl").exists():
                     try:
-                        recovered = parse_stream(directory / "stream.jsonl", native=native, exit_code=child.returncode,
+                        recovered = parse_stream(directory / "stream.jsonl", native=native, collab=args.collab, exit_code=child.returncode,
                                                  timed_out=meta["timed_out"], snapshot=snapshot.path, evidence=snapshot.evidence)
                         diagnostic = dict(recovered["metadata"])
                         diagnostic.pop("status", None)
@@ -366,7 +381,11 @@ def run(args):
         if meta["status"] == "no_changes":
             print("No changes found in the requested review scope.")
         if review:
-            print(review if meta["review_complete"] else f"<incomplete_claude_review>\n{review}\n</incomplete_claude_review>")
+            if meta["review_complete"]:
+                print(review)
+            else:
+                partial_tag = "incomplete_claude_collab" if args.collab else "incomplete_claude_review"
+                print(f"<{partial_tag}>\n{review}\n</{partial_tag}>")
         if meta.get("error"):
             print(meta["error"], file=sys.stderr)
         print("CLAUDE_DELEGATION_METADATA=" + json.dumps(meta, ensure_ascii=True), flush=True)

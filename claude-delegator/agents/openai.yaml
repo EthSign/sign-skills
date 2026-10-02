@@ -1,4 +1,4 @@
 interface:
   display_name: "Claude Delegator"
-  short_description: "Delegate read-only reviews to Claude Code"
+  short_description: "Claude reviews or joint planning and execution"
   default_prompt: "Use $claude-delegator to ask Claude Code for an independent review of the current changes."

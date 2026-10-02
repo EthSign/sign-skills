@@ -73,6 +73,48 @@ class ParseStreamTests(unittest.TestCase):
         self.assertEqual(parsed["metadata"]["status"], "success")
         self.assertEqual(parsed["metadata"]["completion_marker"], "REVIEW_COMPLETE")
 
+    def test_collab_success_requires_substantive_body_and_final_marker(self) -> None:
+        response = "The constraint is unresolved; Codex should execute.\nCOLLAB_TURN_COMPLETE"
+        self.write(assistant(response), terminal(response))
+        parsed = self.parse(collab=True)
+        self.assertTrue(parsed["complete"])
+        self.assertEqual(parsed["metadata"]["status"], "success_collab")
+        self.assertEqual(parsed["metadata"]["response_protocol"], "collab-turn-v1")
+        self.assertEqual(parsed["metadata"]["completion_marker"], "COLLAB_TURN_COMPLETE")
+
+    def test_collab_rejects_incomplete_wrong_and_empty_markers(self) -> None:
+        for response, status in (("Answer\nCOLLAB_TURN_INCOMPLETE", "collab_incomplete"),
+                                 ("Answer", "collab_incomplete"),
+                                 ("Answer\nREVIEW_COMPLETE", "collab_incomplete"),
+                                 ("Answer\nCOLLAB_TURN_COMPLETE\ntrailer", "collab_incomplete"),
+                                 ("COLLAB_TURN_COMPLETE", "collab_empty")):
+            with self.subTest(response=response):
+                self.write(assistant(response), terminal(response))
+                parsed = self.parse(collab=True)
+                self.assertFalse(parsed["complete"])
+                self.assertEqual(parsed["metadata"]["status"], status)
+
+    def test_collab_requires_model_usage_and_rejects_tool_calls(self) -> None:
+        response = "Codex should execute.\nCOLLAB_TURN_COMPLETE"
+        self.write(assistant(response), terminal(response, usage={"input_tokens": 0, "output_tokens": 0}))
+        parsed = self.parse(collab=True)
+        self.assertEqual(parsed["metadata"]["status"], "collab_no_model_usage")
+        self.assertFalse(parsed["complete"])
+        tool = {"type": "tool_use", "name": "Read", "input": {"path": "secret.txt"}}
+        self.write(assistant(response, tool), terminal(response))
+        parsed = self.parse(collab=True)
+        self.assertEqual(parsed["metadata"]["status"], "security_boundary_violation")
+        self.assertFalse(parsed["complete"])
+
+    def test_collab_error_result_cannot_complete(self) -> None:
+        response = "Codex should execute.\nCOLLAB_TURN_COMPLETE"
+        failed = terminal(response)
+        failed["is_error"] = True
+        self.write(assistant(response), failed)
+        parsed = self.parse(collab=True)
+        self.assertFalse(parsed["complete"])
+        self.assertEqual(parsed["metadata"]["status"], "partial_claude_error")
+
     def test_bounded_overflow_is_successful_but_incomplete(self) -> None:
         review = "[P1] finding\nMORE_FINDINGS_REMAIN"
         self.write(assistant(review), terminal(review))
