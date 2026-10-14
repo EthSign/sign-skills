@@ -1,12 +1,33 @@
-"""Offline child fixture, invoked only by test_runner.py."""
+"""Offline Codex CLI fixture, invoked only by test_runner.py; never calls a model."""
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 
+HELP = ("--ignore-user-config --ignore-rules --ephemeral --output-schema --json --strict-config "
+        "--sandbox --output-last-message --skip-git-repo-check")
 mode = os.environ.get("DELEGATOR_TEST_MODE", "success")
+args = sys.argv[1:]
+if args == ["exec", "--help"]:
+    print(HELP)
+    sys.exit(0)
+if args == ["--version"]:
+    if mode == "preflight_hang":
+        # A grandchild inheriting stdout must not extend the bounded preflight.
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        time.sleep(30)
+    print("codex-cli 0.0.0-offline")
+    sys.exit(0)
+if args == ["login", "status"]:
+    sys.exit(0 if os.environ.get("DELEGATOR_TEST_AUTH", "1") == "1" else 1)
+assert args[0] == "exec", args
+if mode == "no_stdin":
+    time.sleep(30)
 prompt = sys.stdin.read()
+if os.environ.get("DELEGATOR_TEST_PROMPT_COPY"):
+    Path(os.environ["DELEGATOR_TEST_PROMPT_COPY"]).write_text(prompt, encoding="utf-8")
 print(json.dumps({"type": "thread.started", "thread_id": "offline-fixture"}), flush=True)
 if mode == "timeout_partial":
     destination = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
@@ -34,6 +55,14 @@ if mode != "missing_final":
     if mode == "many_findings":
         result["findings"] = [{"priority": "P2", "file": "a.txt", "line": i + 1,
                                "title": "Fixture", "body": "Fixture only"} for i in range(12)]
+    if mode == "read_snapshot":
+        # Report what the code-grounded snapshot actually contains.
+        snapshot = next(line.split(": ", 1)[1] for line in prompt.splitlines() if line.startswith("Snapshot: "))
+        result["summary"] = (Path(snapshot) / "a.txt").read_text(encoding="utf-8")
+    if mode == "document_finding":
+        result["findings"] = [
+            {"priority": "P2", "file": "", "line": 0, "title": "Document claim", "body": "No code location"},
+            {"priority": "P3", "file": "a.txt", "line": 1, "title": "Code evidence", "body": "Fixture only"}]
     destination = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
     destination.write_text("{}" if mode == "invalid_final" else json.dumps(result), encoding="utf-8")
 sys.exit(4 if mode == "nonzero" else 0)
