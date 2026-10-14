@@ -1,14 +1,14 @@
 # Codex Delegator
 
-Lets **Claude Code ask Codex for an independent review**, using the installed, authenticated Codex CLI. Supports exact committed diffs, frozen working-tree changes, and standalone plans. It does not edit code or publish reviews.
+Lets **Claude Code ask Codex for an independent review**, using the installed, authenticated Codex CLI. Supports exact committed diffs, frozen working-tree changes, code-grounded reviews of a document or question against an exact commit, and standalone plans. It does not edit code or publish reviews.
 
 ## Requirements and installation
 
 - Python **3.10+**, standard library only; Git for repository reviews.
-- A recent native Codex CLI supporting `exec --ignore-user-config --ignore-rules --ephemeral --output-schema --json`. Development compatibility was checked against `codex-cli 0.154.0-alpha.6.2`.
+- A recent native Codex CLI supporting `exec --ignore-user-config --ignore-rules --ephemeral --output-schema --json`. Development compatibility was checked against `codex-cli 0.154.0-alpha.6.2`; 1.1.0 dry runs were checked against `codex-cli 0.154.0`.
 - Authenticate the CLI yourself with `codex login`; the wrapper checks `codex login status`. Running the desktop app does not establish CLI authentication automatically.
-- Windows uses native `codex.exe`, not the npm `.cmd`/PowerShell shim. Supply `--codex-path` if needed. Python is an explicit dependency; the wrapper does not install it.
-- One Python implementation targets Windows, macOS, and Linux. Windows tests are run during development; macOS/Linux need native validation before claiming platform certification.
+- A bare `codex` (and `git`) resolves only from absolute PATH entries, never Windows' implicit current-directory lookup. Windows uses native `codex.exe`, not the npm `.cmd`/PowerShell shim. Supply `--codex-path` if needed. Python is an explicit dependency; the wrapper does not install it.
+- One Python implementation targets Windows, macOS, and Linux. The 1.0.1 suite of 27 offline tests passed on macOS with Python 3.11 on 2026-10-14, and real runs have worked on macOS. The 1.1.0 suite (46 tests; 45 run on macOS, one is Windows-only) passed on macOS with Python 3.11 on 2026-10-14, as did no-model `--dry-run` checks against the real CLI. 1.1.0 has not yet been run on Windows or Linux or in a real model run; validate natively before claiming those platforms.
 
 Copy this entire directory to `~/.claude/skills/codex-delegator/` for personal use, or `<project>/.claude/skills/codex-delegator/` for project-only use. Do not overwrite an existing customized installation without checking it. This repository copy alone is not an installation into Claude Code.
 
@@ -21,55 +21,70 @@ python3 scripts/invoke-codex.py --repo /path/to/repo \
   --base BASE_SHA --head HEAD_SHA --run-directory /path/to/new-review
 python3 scripts/invoke-codex.py --repo /path/to/repo \
   --working-tree --run-directory /path/to/new-working-review
+python3 scripts/invoke-codex.py --repo /path/to/repo \
+  --head HEAD_SHA --prompt-file /path/to/document-and-question.md
 python3 scripts/invoke-codex.py --prompt-file /path/to/plan.md \
   --model MODEL_ID --effort high --run-directory /path/to/new-plan-review
+python3 scripts/invoke-codex.py --prompt "Is this migration order safe? ..."
 ```
 
-Run from this skill directory, or use an absolute script path. In PowerShell, invoke a known Python executable with `& 'C:\path\python.exe' 'C:\path\invoke-codex.py'` and the same arguments. Run directories must be new and outside the source repository. `--dry-run` performs local setup, compatibility checks, and cleanup without a model call (authentication is reported but not required for a dry run).
+Run from this skill directory, or use an absolute script path. In PowerShell, invoke a known Python executable with `& 'C:\path\python.exe' 'C:\path\invoke-codex.py'` and the same arguments. A supplied run directory must be outside the source repository and either nonexistent or empty; omitting `--run-directory` creates a durable temporary one. Every run prints `CODEX_DELEGATION_RUN_DIRECTORY=<path>` on stderr before preflight, and stdout carries a JSON summary including `run_directory` and `mode`. `--dry-run` performs local setup, compatibility checks, and cleanup without a model call (authentication is reported but not required for a dry run).
 
 | Option | Behavior |
 | --- | --- |
 | `--base`, `--head` | Exact endpoint diff at resolved commit IDs; head defaults to HEAD. No automatic merge-base substitution. |
-| `--working-tree` | Tracked changes relative to HEAD plus nonignored untracked files, frozen into a detached worktree. Cannot combine with revision flags. |
-| `--prompt-file` | Concise UTF-8 objective; without a repository, review only the supplied plan/text. |
+| `--head` without `--base` | With `--repo` and an objective: **code-grounded** mode. Snapshots that exact commit with no diff so Codex can check a document or answer a question against the code. Never implied; `--repo` alone is refused. |
+| `--working-tree` | Tracked changes relative to HEAD plus nonignored untracked files, frozen into a detached worktree. Cannot combine with `--base` or `--head`. |
+| `--prompt-file` | Concise UTF-8 objective, question, or document (at most 1 MiB); without a repository, review only the supplied plan/text. |
+| `--prompt` | The same objective inline; mutually exclusive with `--prompt-file`. Prefer the file for long, quoted, or multiline text. |
+| `--run-directory` | Optional. New or empty directory outside the source repository, claimed exclusively; omitted creates a durable temporary directory. |
 | `--model` | Optional exact model/alias. Default is Codex's built-in choice, **not** the model in user config. No silent fallback. |
 | `--effort` | `low`, `medium` (default), `high`, or `xhigh`; the selected model must support it. |
 | `--timeout-seconds` | Process guard, default 1800; no model-turn, tool-count, output-token, or finding-count cap. |
-| `--codex-path` | Native executable path when not discoverable on PATH. |
+| `--codex-path` | Native executable path when not discoverable on absolute PATH entries. |
 
 Structured output uses `codex exec` rather than the native `review` subcommand: this lets the wrapper specify exact two-endpoint diffs, a caller objective, and a stable JSON result together. Codex reads a patch and relevant snapshot files itself. See the official [non-interactive mode contract](https://learn.chatgpt.com/docs/non-interactive-mode).
 
+### Code-grounded reviews
+
+Use code-grounded mode to review a design document, answer a question, or check claims against the code at one commit. Put the document text, the question, and any context excerpts in the objective; Codex reads whatever snapshot files it needs. The prompt leads with the objective, then the snapshot location and the same read-only boundaries as the other modes. The review `summary` carries the direct answer. Findings cite repository-relative files with one-based lines, or an empty file and line 0 when they concern the supplied document or question rather than a code location. There is no diff and no `no_changes` result: a clean checkout still runs. This mode replaces the earlier workaround of cloning the repository, adding an untracked `REVIEW/` folder, and using `--working-tree`.
+
 ## Safety and scope
 
-The child uses the native **read-only sandbox**, never-approve policy, an empty execution directory, disabled web search, ignored user config/rules, and suppressed project instructions, hooks, plugins, apps, host skills, and additional agents. Read-only shell inspections are expected. Unexpected reported file-change, MCP, web-search, or delegation items make the result incomplete; this is diagnostic validation, not a substitute for sandbox enforcement. The wrapper does not impose a brittle “no shell” rule.
+The child uses the native **read-only sandbox**, never-approve policy, an empty execution directory, disabled web search, ignored user config/rules, and suppressed project instructions, hooks, plugins, apps, host skills, and additional agents. Every mode, including code-grounded, uses the same controls. Read-only shell inspections are expected. Unexpected reported file-change, MCP, web-search, or delegation items make the result incomplete; this is diagnostic validation, not a substitute for sandbox enforcement. The wrapper does not impose a brittle “no shell” rule.
 
 This is **not a hermetic container or read-access boundary**. Codex can read other files the native sandbox permits. Its service connection remains necessary, and reviewed content is sent to the configured model service. Machine-managed policy, authentication, environment, installed executables, and Git configuration remain trusted inputs. CLI controls are based on the [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference); a future CLI may change them. Do not bypass failures by granting full access. Use an independently isolated environment for hostile repositories or sensitive cross-tenant material.
 
 Git snapshot preparation is outside the child sandbox and can use local Git filters; only use trusted Git configuration. Repository instructions are review data, not permission to run code. The model is instructed not to execute project code/tests/installers. That instruction is behavioral, whereas filesystem writes and command network restrictions depend on the native sandbox and applicable machine policy.
 
-Working-tree mode includes staged/unstaged tracked content and nonignored untracked files; it does not preserve staging as a separate review dimension. A staged addition deleted from disk is refused because a collapsed final-state diff would omit it. The source and snapshot fingerprints must match before launch, and source drift after launch invalidates completion. Committed review uses immutable base/head IDs and does not depend on the caller's dirty checkout. Submodule repositories are refused. Working-tree evidence is capped at 64 MiB/250 untracked files, Git commands at 60 seconds. No evidence is silently truncated. An empty scope reports `no_changes` without a model call; it is not a model review.
+Preflight (`codex exec --help`, `codex --version`, `codex login status`) runs from a neutral temporary directory, and preflight and Git commands use file-backed output capture with a timeout and process-group (POSIX) or `taskkill /T` (Windows, from `%SystemRoot%\System32`) cleanup, so an inherited grandchild handle cannot stall the wrapper. The prompt reaches Codex through a temporary file rather than a pipe, so a large prompt cannot block past the timeout on Windows.
+
+Working-tree mode includes staged/unstaged tracked content and nonignored untracked files; it does not preserve staging as a separate review dimension. A staged addition deleted from disk is refused because a collapsed final-state diff would omit it. The source and snapshot fingerprints must match before launch, and source drift after launch invalidates completion. Committed and code-grounded reviews use immutable commit IDs and do not depend on the caller's dirty checkout. Submodule repositories are refused. Working-tree evidence is capped at 64 MiB/250 untracked files, Git commands at 60 seconds. No evidence is silently truncated. An empty committed or working-tree scope reports `no_changes` without a model call; it is not a model review.
 
 ## Recovery and debugging
 
-Every accepted new run directory receives atomic terminal JSON and durable process logs:
+Every accepted run directory receives atomic terminal JSON and durable process logs:
 
 | Artifact | Purpose |
 | --- | --- |
+| `.run-claim` | Exclusive claim holding the wrapper PID; a second caller cannot share the directory. |
 | `status.json` | Live state, start-attempted/started flags, PID when known; terminal state after cleanup. |
 | `preflight.json` | CLI version, requested settings, arguments, scope and hashes; present after successful preparation. |
 | `stream.jsonl`, `stderr.log` | Direct child output, opened before launch. Can contain private source data. |
-| `diff.patch`, `schema.json` | Exact repository patch (when relevant) and final response contract. |
+| `diff.patch`, `schema.json` | Exact repository patch (diff modes only) and final response contract. |
 | `last-message.json` | Native last model message, retained even if invalid or incomplete. |
 | `result.json` | Validated review, with a separate authoritative wrapper `complete` flag. |
-| `metadata.json` | Final status, usage, thread IDs, item counts, duration, scope hashes, cleanup diagnostics. |
+| `metadata.json` | Final status, mode, usage, thread IDs, item counts, duration, scope hashes, cleanup diagnostics. |
 
 A completed review requires successful process exit, a completed turn with reported positive output usage, valid final JSON declaring completion, and no reported failure/prohibited item. Require terminal `status.json.status=complete` as well as completion in both result and metadata. Zero findings are meaningful only for a complete review. There is no arbitrary maximum number of findings. Cost is `null`: the wrapper does not fabricate a dollar estimate from tokens. Requested model is not asserted to be the resolved model.
 
 Atomic JSON replacement retries transient reader locks up to five attempts. Persistent publication failures become `artifact_error`, exit nonzero, and do not prevent attempts to publish the other artifacts. A bounded second publication pass propagates failure state to already-written files. The wrapper also emits `CODEX_DELEGATION_METADATA=<json>` on stderr, including start flags and per-file failures, for recovery when storage is unavailable. This failure record overrides stale files; it is never permission to retry a started model call. If timeout termination truncates JSONL, the primary status remains `timeout`; parse errors are retained separately and any valid final review is preserved as incomplete evidence.
 
-Do not automatically retry after `codex_start_attempted=true`, including spawn ambiguity, timeout, missing output, or lost host task handles. Recover the existing run and seek approval for a new attempt. Native Codex may perform its own transport retries inside the single invocation. Filesystem failures before the run directory can be created cannot produce artifacts; the command exits 2. Other failures exit 1; completion/dry-run/no-changes exits 0. A dry run is never marked as a completed review.
+SIGINT or SIGTERM ends the run with the terminal status `interrupted` and the error “Review interrupted; do not automatically retry”, not a generic `error`. After the first signal, the entry point ignores further SIGINT/SIGTERM, and final child cleanup, snapshot removal, and artifact publication always run with both signals ignored, so repeated termination requests cannot strand a snapshot or skip terminal artifacts.
 
-Temporary snapshots are removed through Git before deleting their owned temporary root. Cleanup ambiguity retains the directory, clears completion, and exits nonzero; any validated review text remains in the artifacts. User artifacts are never automatically deleted. Protect and remove them according to your retention policy.
+Do not automatically retry after `codex_start_attempted=true`, including spawn ambiguity, timeout, interruption, missing output, or lost host task handles. Recover the existing run and seek approval for a new attempt. Native Codex may perform its own transport retries inside the single invocation. Failures before the run directory can be claimed (a nonempty, symlinked, or in-repository directory, or filesystem errors) cannot produce artifacts; the command exits 2. Other failures exit 1; completion/dry-run/no-changes exits 0. A dry run is never marked as a completed review.
+
+Temporary snapshots are removed through Git before deleting their owned temporary root. Cleanup ambiguity retains the directory, clears completion, and exits nonzero; any validated review text remains in the artifacts. User artifacts, including generated temporary run directories, are never automatically deleted. Protect and remove them according to your retention policy.
 
 ## Development
 
@@ -77,4 +92,4 @@ Temporary snapshots are removed through Git before deleting their owned temporar
 python3 -m unittest discover -s tests -v
 ```
 
-Tests use fake child processes and disposable Git repositories; they do not contact Codex or consume model allowance. A real CLI dry-run verifies advertised flags but is not an authenticated end-to-end model test. See [CHANGELOG.md](CHANGELOG.md).
+Use a Python 3.10+ interpreter (for example `python3.11` where the system `python3` is older). Tests use fake child processes and disposable Git repositories; they do not contact Codex or consume model allowance. On POSIX, one test also runs the wrapper as a separate process behind a fake `codex` on PATH and sends it repeated SIGTERM. A real CLI dry-run verifies advertised flags but is not an authenticated end-to-end model test. See [CHANGELOG.md](CHANGELOG.md).
