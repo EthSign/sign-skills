@@ -1,5 +1,11 @@
 # Installation and maintenance
 
+## Skill-manager installation without global guidance
+
+Install with `npx skills add EthSign/sign-skills --skill codex-agent-ladder --agent codex --global --yes`. Skill discovery and the bundled role profiles support the explicit model-override path without installing native profiles or writing global AGENTS.md guidance. This mode requires a host exposing explicit spawn model and effort overrides. If automatic discovery does not select the skill, invoke `$codex-agent-ladder` explicitly. Do not run the Python installer for this mode. Leave unrelated global guidance unchanged; clearing it requires an explicit user request. Preserve and reconcile local customizations before skill-manager updates.
+
+## Alternative native-profile installation
+
 Requires Python 3.11+ (standard library only) and a Codex client with subagent support. Native profiles use the current standalone agent TOML format. Hosts exposing only model overrides can follow the fallback instructions in SKILL.md.
 
 Resolve `scripts/install.py` relative to this skill. On Windows, use an actual Python executable or `py -3`; a Microsoft Store stub is insufficient. Substitute the absolute script path in these commands:
