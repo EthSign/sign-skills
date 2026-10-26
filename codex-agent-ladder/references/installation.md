@@ -52,6 +52,14 @@ Change the model and reasoning values in a bundled `assets/subagents/ladder-*.to
 
 The shipped settings are starting points, not a claim of optimal cost or universally available models. Choose models your account can access and efforts those models support. The verifier has a separate context; it can use the same model family as the worker. For more demanding review, customize its model and effort rather than requiring the most expensive configuration for every change.
 
+Scout and verifier roles avoid source edits by instruction. Native and fallback workers inherit parent permissions; `sandbox_mode` and `approval_policy` in a custom-agent profile do not create a separate permission boundary. The installer rejects these misleading profile fields. Configure enforcement on the parent session.
+
+## Interrupted operations
+
+The installer writes a validated `codex-agent-ladder.transaction.json` ownership journal before changing resources. After an interruption, rerun install or uninstall to reconcile ownership against the bytes actually present. Recovery never replays resource writes over later edits. Files customized after interruption remain protected, and identical files that predated installation remain unowned. Run maintenance serially for a given target.
+
+`--dry-run` and `--verify` report a pending journal without changing it. After recovery, normal conflict handling applies. Do not delete a pending journal to suppress the warning: it may be the only ownership record for a partial installation.
+
 ## Remove
 
 ```sh
@@ -71,7 +79,7 @@ python -m unittest discover -s /path/to/codex-agent-ladder/tests -v
 
 Runtime verification is a separate model-consuming task. When requested, delegate a small read-only fixture using each available role and inspect runtime-reported model metadata when exposed. Self-reported model names are not proof of routing. Evaluate real work against an ordinary Codex baseline using elapsed time, recorded usage, escalations, and defects; static installation tests cannot establish savings.
 
-Configuration references, checked September 29, 2026:
+Configuration references, checked October 26, 2026:
 
 - [Custom Codex agents and model selection](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents)
 - [Skill authoring and discovery](https://learn.chatgpt.com/docs/build-skills)

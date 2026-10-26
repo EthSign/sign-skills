@@ -100,10 +100,8 @@ class Layout:
                     raise ValueError(f"Missing {key} in {name}")
             if profile.get("model_reasoning_effort") not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
                 raise ValueError(f"Invalid reasoning effort in {name}")
-            if profile.get("sandbox_mode") not in {None, "read-only", "workspace-write"}:
-                raise ValueError(f"Unsupported sandbox mode in {name}")
-            if name in {"ladder-scout", "ladder-verifier"} and profile.get("sandbox_mode") != "read-only":
-                raise ValueError(f"Read-only role requires a read-only profile: {name}")
+            if "sandbox_mode" in profile or "approval_policy" in profile:
+                raise ValueError(f"Configure permissions on the parent session, not profile {name}")
             files[self.codex / "agents" / f"{name}.toml"] = data
         for path in files:
             self.check(path)
@@ -154,7 +152,10 @@ def load_manifest(path: Path, layout: Layout, desired: dict[Path, bytes]) -> dic
     layout.check(path)
     if not path.exists():
         return {"schema": 1, "files": {}, "rules": None}
-    record = json.loads(read_text(path).lstrip("\ufeff"))
+    return validate_manifest(json.loads(read_text(path).lstrip("\ufeff")), layout, desired)
+
+
+def validate_manifest(record: dict, layout: Layout, desired: dict[Path, bytes]) -> dict:
     if not isinstance(record, dict) or record.get("schema") != 1 or not isinstance(record.get("files"), dict):
         raise ValueError("Invalid ladder manifest")
     allowed = {layout.key(p) for p in desired}
@@ -170,6 +171,44 @@ def load_manifest(path: Path, layout: Layout, desired: dict[Path, bytes]) -> dic
             raise ValueError("Invalid routing manifest entry")
         layout.check(layout.root / rules["path"])
     return record
+
+
+def recover_ownership(journal: Path, manifest: Path, layout: Layout,
+                      desired: dict[Path, bytes]) -> None:
+    """Recover ownership only; never replay writes over user files."""
+    record = json.loads(read_text(journal))
+    if not isinstance(record, dict) or record.get("schema") != 1:
+        raise ValueError("Invalid ladder transaction journal")
+    before = validate_manifest(record.get("before"), layout, desired)
+    after = validate_manifest(record.get("after"), layout, desired)
+    owned = {}
+    for key in before["files"].keys() | after["files"].keys():
+        path = layout.root / key
+        if not path.exists():
+            continue
+        current = digest(path.read_bytes())
+        if current == after["files"].get(key):
+            owned[key] = current
+        else:
+            # Keep the last known hash for an incomplete update or a subsequent
+            # customization. Removal will preserve bytes that no longer match.
+            owned[key] = before["files"].get(key, after["files"].get(key))
+    old_rules, new_rules = before.get("rules"), after.get("rules")
+    rules = old_rules or new_rules
+    if rules:
+        text = read_text(layout.root / rules["path"])
+        span = bounds(text)
+        if span is None:
+            rules = None
+        elif new_rules and block_digest(text[slice(*span)]) == new_rules["sha256"]:
+            rules = new_rules
+    recovered = {"schema": 1, "files": owned, "rules": rules}
+    if owned or rules:
+        write_atomic(manifest, (json.dumps(recovered, indent=2, sort_keys=True) + "\n").encode())
+    else:
+        manifest.unlink(missing_ok=True)
+    journal.unlink()
+    print("recovered: ownership from interrupted operation; user files were not replayed")
 
 
 @dataclass
@@ -214,9 +253,17 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
              verify: bool = False, uninstall: bool = False) -> int:
     desired = layout.desired(source)
     manifest_path = layout.codex / f"{NAME}.manifest.json"
+    journal_path = layout.codex / f"{NAME}.transaction.json"
+    layout.check(manifest_path)
+    layout.check(journal_path)
+    if journal_path.exists():
+        if dry_run or verify:
+            print("pending interrupted operation: run install or uninstall to recover ownership")
+            return 1
+        recover_ownership(journal_path, manifest_path, layout, desired)
     manifest = load_manifest(manifest_path, layout, desired)
     owned = manifest["files"].copy()
-    rules_record = manifest.get("rules")
+    rules_record = dict(manifest["rules"]) if manifest.get("rules") else None
     guidance = layout.root / rules_record["path"] if uninstall and rules_record else active_guidance(layout)
     layout.check(guidance)
     text = read_text(guidance)
@@ -310,7 +357,15 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
         changes.append(Change(manifest_path, None, "remove manifest"))
     for issue in issues:
         print(issue)
+    if changes and not dry_run:
+        # Persist ownership intent before the first resource mutation. On retry,
+        # reconcile against observed bytes instead of claiming identical files
+        # that predated this operation or replaying stale content over edits.
+        journal = {"schema": 1, "before": manifest, "after": new_manifest}
+        write_atomic(journal_path, (json.dumps(journal, indent=2, sort_keys=True) + "\n").encode())
     execute(changes, layout, dry_run)
+    if changes and not dry_run:
+        journal_path.unlink()
     if not changes and not issues:
         print("no changes needed")
     return int(bool(issues))

@@ -44,7 +44,9 @@ If a skill manager has already copied this directory, run its installed `scripts
 
 ## Routing and maintenance
 
-The main agent plans and integrates. Independent tasks can run concurrently with disjoint file ownership; workers do not spawn further agents. Hard work can start at the deep tier, and ordinary work gets at most one escalation. Separate verification scales to the complexity and consequence of a change. Routing conventions do not enforce a hard spending limit or guarantee lower usage.
+The main agent plans and integrates, and can complete tightly coupled work without workers. Independent tasks can run concurrently with disjoint file ownership; workers do not spawn further agents. Choose capability independently from role. Understood failures get bounded repairs; unresolved reasoning can justify capability escalation. Handoffs identify the relevant snapshot and existing evidence, and verification responsibilities are assigned to avoid redundant checks. Routing conventions do not enforce a hard spending limit or guarantee lower usage.
+
+Read-only roles are instruction constraints, not separate sandboxes. Both native and fallback workers inherit parent permissions.
 
 ```sh
 python codex-agent-ladder/scripts/install.py --verify
