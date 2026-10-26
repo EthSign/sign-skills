@@ -260,6 +260,28 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse(self.worker().exists())
         self.assertNotIn(installer.BEGIN, (self.target / "AGENTS.md").read_text())
 
+    def test_interrupted_uninstall_from_installed_source_can_finish(self):
+        self.assertEqual(self.run_install(), 0)
+        self.source = self.layout.skill
+        self.interrupt_after(lambda change: change.path == self.source / "SKILL.md", uninstall=True)
+        self.assertFalse((self.source / "SKILL.md").exists())
+        script = self.source / "scripts/install.py"
+        result = subprocess.run([sys.executable, str(script), "--codex-dir", str(self.target),
+                                 "--uninstall"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.worker().exists())
+        self.assertFalse(script.exists())
+
+    def test_uninstall_preserves_malformed_bundled_customization(self):
+        self.assertEqual(self.run_install(), 0)
+        self.source = self.layout.skill
+        profile = self.source / "assets/subagents/ladder-scout.toml"
+        profile.write_bytes(b"invalid TOML customization [")
+        self.assertEqual(self.run_install(uninstall=True), 1)
+        self.assertEqual(profile.read_bytes(), b"invalid TOML customization [")
+        self.assertFalse(self.worker().exists())
+        self.assertNotIn(installer.BEGIN, (self.target / "AGENTS.md").read_text())
+
     def test_invalid_transaction_rejected_without_mutation(self):
         self.interrupt_after(lambda change: change.path == self.layout.skill / "SKILL.md")
         journal = self.target / f"{installer.NAME}.transaction.json"

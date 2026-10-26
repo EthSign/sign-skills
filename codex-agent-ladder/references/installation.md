@@ -56,7 +56,7 @@ Scout and verifier roles avoid source edits by instruction. Native and fallback 
 
 ## Interrupted operations
 
-The installer writes a validated `codex-agent-ladder.transaction.json` ownership journal before changing resources. After an interruption, rerun install or uninstall to reconcile ownership against the bytes actually present. Recovery never replays resource writes over later edits. Files customized after interruption remain protected, and identical files that predated installation remain unowned. Run maintenance serially for a given target.
+The installer writes a validated `codex-agent-ladder.transaction.json` ownership journal before changing resources. After an interruption, rerun install or uninstall to reconcile ownership against the bytes actually present. If the installed script itself has been removed, run the command from an intact copy of this package with the same target. Uninstall does not require intact bundled resources. Recovery never replays resource writes over later edits. Files customized after interruption remain protected, and identical files that predated installation remain unowned. Run maintenance serially for a given target.
 
 `--dry-run` and `--verify` report a pending journal without changing it. After recovery, normal conflict handling applies. Do not delete a pending journal to suppress the warning: it may be the only ownership record for a partial installation.
 

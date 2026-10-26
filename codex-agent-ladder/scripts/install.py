@@ -107,6 +107,15 @@ class Layout:
             self.check(path)
         return files
 
+    def removal_targets(self) -> dict[Path, bytes]:
+        # Uninstall may run from its own partially removed or customized package.
+        # Its allowlist must not depend on the contents of those source files.
+        paths = [self.skill / relative for relative in RESOURCES]
+        paths.extend(self.codex / "agents" / f"{name}.toml" for name in PROFILES)
+        for path in paths:
+            self.check(path)
+        return dict.fromkeys(paths, b"")
+
 
 def bounds(text: str) -> tuple[int, int] | None:
     """Require exactly one whole-line marker pair outside balanced code fences."""
@@ -251,7 +260,7 @@ def execute(changes: list[Change], layout: Layout, dry_run: bool) -> None:
 
 def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool = False,
              verify: bool = False, uninstall: bool = False) -> int:
-    desired = layout.desired(source)
+    desired = layout.removal_targets() if uninstall else layout.desired(source)
     manifest_path = layout.codex / f"{NAME}.manifest.json"
     journal_path = layout.codex / f"{NAME}.transaction.json"
     layout.check(manifest_path)
@@ -269,7 +278,7 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
     text = read_text(guidance)
     span = bounds(text)
     expected_block = desired[layout.skill / "assets/routing.md"].decode("utf-8").rstrip("\n")
-    if bounds(expected_block) != (0, len(expected_block)):
+    if not uninstall and bounds(expected_block) != (0, len(expected_block)):
         raise ValueError("Invalid bundled routing block")
     present_block = text[slice(*span)] if span else None
     changes = []
