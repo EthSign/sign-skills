@@ -1,6 +1,6 @@
 # Codex Agent Ladder
 
-A Codex skill that installs four tiered subagents and automatically routes substantial implementation, debugging, codebase research, and review work to them. Installation enables the routing through a managed block in the active `AGENTS.md` guidance file. A separate delegation request is unnecessary; quick tasks remain in the main agent.
+A Codex skill that routes substantial implementation, debugging, codebase research, and review work through four roles. Use skill discovery with explicit model overrides, or install native profiles and a managed routing block in `AGENTS.md`. Once the skill applies, no separate delegation request is necessary; quick tasks remain in the main agent.
 
 ## Roles
 
@@ -11,9 +11,21 @@ A Codex skill that installs four tiered subagents and automatically routes subst
 | `ladder_deep_worker` | `gpt-6-astra` / high | Difficult debugging, design, and migrations. |
 | `ladder_verifier` | `gpt-6.1-sol` / high | Separate read-only review of an integrated result. |
 
-These are configurable presets. Choose models and reasoning levels available to your account. The verifier uses a separate context and can share the worker's model family.
+These are starting presets, not a mandatory model hierarchy. Select among available models, including Sol 6.1, Terra 6.1, and newly exposed models, based on task difficulty, consequences, and total usage including retries. Workers may use higher reasoning effort than the parent. The verifier uses a separate context and can share the worker's model family. Fixed native profile settings take precedence over spawn overrides; use the explicit override path when selecting different settings for an assignment.
+
+Consider `gpt-6.1-terra` for bounded visual reasoning, supported computer use, clear writing, and scoped code fixes, starting at medium effort when appropriate. Choose only model/effort combinations exposed by the host. Terra is an alternative for a suitable assignment, not a mandatory replacement for the existing presets. See [OpenAI's model selection guidance](https://learn.chatgpt.com/docs/model-selection).
 
 ## Install
+
+For skill-only installation without global guidance or native profiles:
+
+```sh
+npx skills add EthSign/sign-skills --skill codex-agent-ladder --agent codex --global --yes
+```
+
+Use a host with explicit spawn model and effort overrides. Invoke `$codex-agent-ladder` if needed. This mode uses bundled role instructions and does not require running the Python installer.
+
+For native profiles and a managed global routing block:
 
 Requires Python 3.11+ and a Codex client with subagent support. From this repository's checkout:
 
@@ -30,11 +42,13 @@ For a project-scoped installation:
 python codex-agent-ladder/scripts/install.py --project /path/to/repository
 ```
 
-If a skill manager has already copied this directory, run its installed `scripts/install.py` once to enable the profiles and automatic routing. Copying skill files alone does not execute the installer.
+If a skill manager has already copied this directory, run its installed `scripts/install.py` only when native profiles and global routing guidance are desired. Copying skill files alone does not execute the installer.
 
 ## Routing and maintenance
 
-The main agent plans and integrates. Independent tasks can run concurrently with disjoint file ownership; workers do not spawn further agents. Hard work can start at the deep tier, and ordinary work gets at most one escalation. Separate verification scales to the complexity and consequence of a change. Routing conventions do not enforce a hard spending limit or guarantee lower usage.
+The main agent plans and integrates, and can complete tightly coupled work without workers. Independent tasks can run concurrently with disjoint file ownership; workers do not spawn further agents. Choose capability independently from role. Understood failures get bounded repairs; unresolved reasoning can justify capability escalation. Handoffs identify the relevant snapshot and existing evidence, and verification responsibilities are assigned to avoid redundant checks. Routing conventions do not enforce a hard spending limit or guarantee lower usage.
+
+Read-only roles are instruction constraints, not separate sandboxes. Both native and fallback workers inherit parent permissions.
 
 ```sh
 python codex-agent-ladder/scripts/install.py --verify
