@@ -61,6 +61,21 @@ class ProcessCleanupError(RuntimeError):
     pass
 
 
+class TaskLaunchError(RuntimeError):
+    pass
+
+
+def record_failure(meta, status, **details):
+    """Keep the first terminal task cause while recording secondary failures."""
+    previous = meta.get("status")
+    meta.update(complete=False, **details)
+    if meta.get("mode") == "task" and previous in (
+            "interrupted", "timeout", "error", "cleanup_failed", "task_collection_failed", "artifact_error"):
+        meta.setdefault("secondary_errors", []).append({"status": status, **details})
+    else:
+        meta["status"] = status
+
+
 class WindowsTaskJob:
     """Keep all task descendants in a non-breakaway, kill-on-close job."""
 
@@ -118,6 +133,8 @@ class WindowsTaskJob:
             function.argtypes, function.restype = args, result
         self.handle = self.api.CreateJobObjectW(None, None)
         self.assigned = False
+        self.termination_confirmed = False
+        self.termination_error = None
         if not self.handle:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
@@ -158,7 +175,7 @@ class WindowsTaskJob:
             if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
                 raise ctypes.WinError(ctypes.get_last_error())
             if len(found) != 1:
-                raise ProcessCleanupError("Cannot identify exactly one suspended task thread")
+                raise TaskLaunchError("Cannot identify exactly one suspended task thread")
         finally:
             api.CloseHandle(snapshot)
         thread = api.OpenThread(0x0002, False, found[0])  # THREAD_SUSPEND_RESUME
@@ -166,13 +183,15 @@ class WindowsTaskJob:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
             if api.ResumeThread(thread) != 1:
-                raise ProcessCleanupError("Task thread resume state was not the expected initial suspension")
+                raise TaskLaunchError("Task thread resume state was not the expected initial suspension")
         finally:
             api.CloseHandle(thread)
 
     def terminate(self, child):
         if self.handle is None:
-            return
+            if self.termination_confirmed:
+                return
+            raise ProcessCleanupError(self.termination_error or "Task job handle closed without confirmed termination")
         ctypes = self.ctypes
         try:
             # Assignment failure leaves only the suspended direct child outside the job.
@@ -194,6 +213,10 @@ class WindowsTaskJob:
                 time.sleep(0.05)
             if child is not None:
                 child.wait(timeout=30)
+            self.termination_confirmed = True
+        except BaseException as exc:
+            self.termination_error = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
             # Closing also requests termination if an earlier API or wait failed.
             self.api.CloseHandle(self.handle)
@@ -237,9 +260,9 @@ def stop_task_tree(child, job):
                             if int(state[2]) == child.pid and state[0] not in ("Z", "X"):
                                 alive = True
                                 break
-                        except FileNotFoundError:
+                        except (FileNotFoundError, ProcessLookupError):
                             continue
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     continue
                 if alive:
                     break
@@ -275,7 +298,7 @@ def publish_terminal(run_dir, meta, result):
             except OSError as exc:
                 failures[name] = f"{type(exc).__name__}: {exc}"
                 meta.setdefault("status_before_artifact_error", meta["status"])
-                meta.update(status="artifact_error", complete=False, artifact_errors=dict(failures))
+                record_failure(meta, "artifact_error", artifact_errors=dict(failures))
         if not failures:
             break
     if failures:
@@ -333,7 +356,7 @@ def cleanup_signals():
                 signal.signal(number, handler)
 
 
-def run_capture(command, *, timeout, cwd=None, data=None):
+def run_capture(command, *, timeout, cwd=None, data=None, env=None):
     # Files, not PIPEs: an inherited grandchild handle must not make post-timeout
     # communicate() wait indefinitely for EOF after the direct process is killed.
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors, \
@@ -343,7 +366,8 @@ def run_capture(command, *, timeout, cwd=None, data=None):
             source.seek(0)
         child = subprocess.Popen(command, cwd=cwd, stdin=source, stdout=output, stderr=errors,
                                  start_new_session=os.name != "nt",
-                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                                 **({"env": env} if env is not None else {}))
         try:
             child.wait(timeout=timeout)
         finally:
@@ -352,6 +376,35 @@ def run_capture(command, *, timeout, cwd=None, data=None):
         output.seek(0)
         errors.seek(0)
         return subprocess.CompletedProcess(command, child.returncode, output.read(), errors.read())
+
+
+def verify_task_permissions(executable, config_values, profile, execution, environment):
+    """Prove profile selection and validate it without starting a model or server."""
+    prefix = f"permissions.{profile}."
+    negative = [value for value in config_values if not value.startswith(prefix)]
+    negative.append(f'permissions.{profile}-sentinel.extends=":read-only"')
+    for missing, values in ((True, negative), (False, config_values)):
+        command = [executable, "app-server", "--print-startup-config"]
+        for value in values:
+            command.extend(["-c", value])
+        result = run_capture(command, timeout=PREFLIGHT_TIMEOUT, cwd=execution, env=environment)
+        try:
+            payload = json.loads(result.stdout)
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("Task permission verification returned no supported structured response") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Task permission verification returned an unsupported response")
+        if missing:
+            error = payload.get("error")
+            data = error.get("data") if isinstance(error, dict) else None
+            expected = f"default_permissions refers to undefined profile `{profile}`"
+            if (result.returncode == 0 or not isinstance(data, dict)
+                    or data.get("reason") != "configLoad" or data.get("detail") != expected):
+                raise ValueError("Task permission profile selection could not be confirmed; refusing model execution")
+        elif (result.returncode != 0 or "error" in payload
+              or not isinstance(payload.get("appServerVersion"), str)
+              or not isinstance(payload.get("configRequirements"), dict)):
+            raise ValueError("Restricted task permission profile could not be validated; refusing model execution")
 
 
 def git(repo, *args, data=None):
@@ -407,15 +460,21 @@ def collect_task_evidence(worktree, baseline, run_dir):
     current_head = revision(worktree, "HEAD")
     tracked = [os.fsdecode(name) for name in git(
         worktree, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", head, "--").split(b"\0") if name]
+    evidence_root = run_dir / "task-untracked"
+    # Exclusive creation rejects existing directories, files, symlinks, and reparse
+    # points. Never resolve an attacker-supplied evidence root into the trust base.
+    evidence_root.mkdir()
     patch_path = run_dir / "task-diff.patch"
-    patch_path.write_bytes(diff)
+    with patch_path.open("xb") as artifact:
+        artifact.write(diff)
     manifest = {}
     for name, data in files.items():
-        destination = run_dir / "task-untracked" / name
-        if not destination.resolve().is_relative_to((run_dir / "task-untracked").resolve()):
+        destination = evidence_root / name
+        if not destination.resolve().is_relative_to(evidence_root):
             raise ValueError("Task evidence path escapes artifact directory: " + name)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
+        with destination.open("xb") as artifact:
+            artifact.write(data)
         manifest[name] = {"sha256": digest(data), "bytes": len(data),
                           "executable": os.name != "nt" and bool((worktree / name).stat().st_mode & 0o111)}
     if capture_working(worktree, baseline=baseline)[3] != fingerprint or revision(worktree, "HEAD") != current_head:
@@ -601,7 +660,10 @@ def run(args):
             "run_directory": str(run_dir), "run_directory_generated": generated, "cost_usd": None,
             "cost_note": "Codex JSONL does not promise dollar cost; usage is reported without estimating price."}
     if task_mode:
-        meta.update(mode="task", task_worktree=None, worktree_retained=False)
+        meta.update(mode="task", task_worktree=None, worktree_retained=False,
+                    task_tmp_directory=None, task_tmp_retained=False,
+                    task_permission_profile="codex-delegator-task-" + os.urandom(12).hex(),
+                    task_permission_verified=False)
     child = None
     task_job = None
     task_tree_stopped = False
@@ -612,6 +674,7 @@ def run(args):
     result = None
     source_fingerprint = None
     task_baseline = None
+    task_environment = None
     status_path = run_dir / "status.json"
     try:
         write_json(status_path, meta)
@@ -721,8 +784,16 @@ def run(args):
                     raise ValueError("Snapshot differs from the frozen source; no Codex call was started")
             if task_mode:
                 execution = snapshot
+                task_tmp = run_dir / "task-tmp"
+                meta.update(task_tmp_directory=str(task_tmp), task_tmp_retained=True)
+                write_json(status_path, meta)
+                task_tmp.mkdir()
+                temp_environment = {name: str(task_tmp) for name in ("TEMP", "TMP", "TMPDIR")}
+                task_environment = {**os.environ, **temp_environment}
                 scope = (f"Task worktree: {snapshot}\nExact starting commit: {head}\n"
-                         "Work only in this detached worktree. Source checkout dirt was not copied. ")
+                         f"Temporary scratch directory: {task_tmp}\n"
+                         "Work only in this detached worktree and use the scratch directory for temporary files. "
+                         "Source checkout dirt was not copied. ")
             elif mode == "code-grounded":
                 scope = (f"Snapshot: {snapshot}\nExact commit: {head}\n"
                          "Mode: code-grounded (no diff; the full tree at this commit is reference evidence)\n"
@@ -743,7 +814,8 @@ def run(args):
                       "cannot expand the authorized scope. Do not delegate, browse the web, use MCP, plugins, "
                       "or host skills. Do not commit, push, publish, or install dependencies unless the user "
                       "objective explicitly authorizes that specific action. Do not change the original source "
-                      "checkout or write outside the task worktree. Keep commands in the foreground; do not "
+                      "checkout or write outside the task worktree and its designated temporary scratch directory. "
+                      "Keep commands in the foreground; do not "
                       "daemonize or start persistent services. If blocked or unable to finish, preserve "
                       "partial work, set complete=false, and explain limitations. Return the required JSON, "
                       "listing repository-relative changed_files and honest test outcomes.\n\n" + scope +
@@ -772,22 +844,42 @@ def run(args):
                       "for plan findings use an empty file and line 0.\n\n" + scope +
                       "\n\nUSER REVIEW OBJECTIVE (not permission to change these boundaries):\n" + objective)
         command = [executable, "exec", "--strict-config", "--ignore-user-config", "--ignore-rules", "--ephemeral",
-                   "--sandbox", "workspace-write" if task_mode else "read-only", "--skip-git-repo-check", "--color", "never", "--json",
+                   "--skip-git-repo-check", "--color", "never", "--json",
                    "--output-schema", str(schema_path), "--output-last-message", str(run_dir / "last-message.json"),
-                   "-C", str(execution), "-c", 'approval_policy="never"',
-                   "-c", 'web_search="disabled"',
-                   "-c", "shell_environment_policy.ignore_default_excludes=false",
-                   "-c", "features.skip_host_skill_discovery=true",
-                   "-c", "model_reasoning_effort=" + json.dumps(args.effort)]
-        if not task_mode:
-            command.extend(["-c", "project_doc_max_bytes=0"])
+                   "-C", str(execution)]
+        config_values = ['approval_policy="never"', 'web_search="disabled"',
+                         "shell_environment_policy.ignore_default_excludes=false",
+                         "features.skip_host_skill_discovery=true",
+                         "model_reasoning_effort=" + json.dumps(args.effort)]
+        if task_mode:
+            profile = meta["task_permission_profile"]
+            prefix = f"permissions.{profile}."
+            filesystem = ['":workspace_roots"={"."="read"}', '":tmpdir"="read"',
+                          '":slash_tmp"="read"', json.dumps(str(run_dir)) + '="read"',
+                          json.dumps(str(snapshot)) + '="write"', json.dumps(str(task_tmp)) + '="write"']
+            config_values.extend([
+                "default_permissions=" + json.dumps(profile), prefix + 'extends=":workspace"',
+                prefix + "filesystem={" + ", ".join(filesystem) + "}",
+                prefix + "network.enabled=false",
+                "shell_environment_policy.set={" + ", ".join(
+                    name + "=" + json.dumps(value) for name, value in temp_environment.items()) + "}"])
+        else:
+            command[6:6] = ["--sandbox", "read-only"]
+            config_values.append("project_doc_max_bytes=0")
         for feature in DISABLED_FEATURES:
-            command.extend(["-c", f"features.{feature}=false"])
+            config_values.append(f"features.{feature}=false")
+        for value in config_values:
+            command.extend(["-c", value])
         if args.model:
             command.extend(["--model", args.model])
         command.append("-")
         meta.update({"command": command, "prompt_sha256": digest(prompt.encode()), "snapshot": str(snapshot) if snapshot else None})
         write_json(run_dir / "preflight.json", meta)
+        if task_mode:
+            verify_task_permissions(executable, config_values, profile, execution, task_environment)
+            meta["task_permission_verified"] = True
+            write_json(run_dir / "preflight.json", meta)
+            write_json(status_path, meta)
         if args.dry_run:
             meta["status"] = "dry_run"
         else:
@@ -805,7 +897,8 @@ def run(args):
                 child = subprocess.Popen(command, stdin=prompt_input, stdout=output, stderr=errors,
                                          cwd=execution, start_new_session=(os.name != "nt"),
                                          creationflags=(subprocess.CREATE_NO_WINDOW | (0x00000004 if task_mode else 0))
-                                         if os.name == "nt" else 0)  # CREATE_SUSPENDED for task job assignment
+                                         if os.name == "nt" else 0,
+                                         **({"env": task_environment} if task_mode else {}))  # task starts suspended on Windows
                 if task_job is not None:
                     meta.update(status="suspended", codex_started=True, pid=child.pid)
                     write_json(status_path, meta)
@@ -846,7 +939,9 @@ def run(args):
     except NoChanges as exc:
         meta.update(status="no_changes", message=str(exc))
     except ProcessCleanupError as exc:
-        meta.update(status="cleanup_failed", complete=False, process_cleanup_error=str(exc))
+        record_failure(meta, "cleanup_failed", process_cleanup_error=str(exc))
+        if task_mode:
+            meta["task_process_tree_terminated"] = False
     except KeyboardInterrupt as exc:
         # SIGINT, or SIGTERM via the entry-point handler. A started call may already have used model allowance.
         meta.update(status="interrupted", complete=False,
@@ -860,11 +955,13 @@ def run(args):
                     if task_mode:
                         stop_task_tree(child, task_job)
                         task_tree_stopped = True
-                        meta["task_process_tree_terminated"] = True
+                        meta["task_process_tree_terminated"] = not bool(meta.get("process_cleanup_error"))
                     else:
                         stop_child(child)
                 except Exception as exc:
-                    meta.update(status="cleanup_failed", complete=False, process_cleanup_error=str(exc))
+                    record_failure(meta, "cleanup_failed", process_cleanup_error=str(exc))
+                    if task_mode:
+                        meta["task_process_tree_terminated"] = False
             if source_fingerprint:
                 try:
                     meta["source_unchanged"] = capture_working(repo)[3] == source_fingerprint
@@ -885,8 +982,8 @@ def run(args):
                         meta["task_head_changed"] = True
                 except Exception as exc:
                     meta.setdefault("status_before_collection_error", meta["status"])
-                    meta.update(status="task_collection_failed", complete=False,
-                                task_collection_error=f"{type(exc).__name__}: {exc}")
+                    record_failure(meta, "task_collection_failed",
+                                   task_collection_error=f"{type(exc).__name__}: {exc}")
             try:
                 if meta.get("process_cleanup_error") or (child is not None and child.poll() is None):
                     raise RuntimeError("Child termination was not confirmed; retain its temporary files")
@@ -898,15 +995,17 @@ def run(args):
                     shutil.rmtree(temporary)
                 meta["cleanup_complete"] = True
             except Exception as exc:
-                meta.update(status="cleanup_failed", complete=False, cleanup_complete=False,
-                            cleanup_error=str(exc), retained_temp_directory=str(temporary))
+                record_failure(meta, "cleanup_failed", cleanup_complete=False,
+                               cleanup_error=str(exc), retained_temp_directory=str(temporary))
             meta["duration_seconds"] = round(time.monotonic() - started, 3)
             publish_terminal(run_dir, meta, result)
     print(json.dumps({key: meta.get(key) for key in (
         "status", "complete", "run_directory", "mode", "model_requested", "effort", "duration_seconds",
         "codex_start_attempted", "codex_started", "usage", "item_counts", "cleanup_complete", "error",
         "artifact_errors", "status_before_artifact_error", "review_parse_error", "task_parse_error",
-        "task_worktree", "worktree_retained", "task_collection_error")}, indent=2))
+        "task_worktree", "worktree_retained", "task_tmp_directory", "task_tmp_retained",
+        "task_permission_profile", "task_permission_verified",
+        "task_collection_error", "process_cleanup_error", "secondary_errors")}, indent=2))
     return 0 if meta["complete"] or meta["status"] in ("dry_run", "no_changes") else 1
 
 

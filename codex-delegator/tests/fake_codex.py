@@ -22,6 +22,24 @@ if args == ["--version"]:
     sys.exit(0)
 if args == ["login", "status"]:
     sys.exit(0 if os.environ.get("DELEGATOR_TEST_AUTH", "1") == "1" else 1)
+if args[0] == "app-server":
+    overrides = dict(value.split("=", 1) for i, value in enumerate(args) if i and args[i - 1] == "-c")
+    profile = json.loads(overrides["default_permissions"])
+    defined = any(key.startswith("permissions." + profile + ".") for key in overrides)
+    if mode == "task_permission_malformed":
+        print("invalid startup response")
+        sys.exit(1)
+    if not defined and mode != "task_permission_fallback":
+        detail = f"default_permissions refers to undefined profile `{profile}`"
+        if mode == "task_permission_unrelated_error":
+            detail = "an unrelated configuration error"
+        print(json.dumps({"error": {"data": {"reason": "configLoad", "detail": detail}}}))
+        sys.exit(1)
+    if defined and mode == "task_permission_rejected":
+        print(json.dumps({"error": {"data": {"reason": "configLoad", "detail": "unsupported profile"}}}))
+        sys.exit(1)
+    print(json.dumps({"appServerVersion": "0.0.0-offline", "configRequirements": {}}))
+    sys.exit(0)
 assert args[0] == "exec", args
 if mode == "no_stdin":
     time.sleep(30)
@@ -29,7 +47,7 @@ prompt = sys.stdin.buffer.read().decode("utf-8")
 if os.environ.get("DELEGATOR_TEST_PROMPT_COPY"):
     Path(os.environ["DELEGATOR_TEST_PROMPT_COPY"]).write_text(prompt, encoding="utf-8")
 print(json.dumps({"type": "thread.started", "thread_id": "offline-fixture"}), flush=True)
-task = args[args.index("--sandbox") + 1] == "workspace-write"
+task = any(value.startswith("default_permissions=") for value in args)
 if task:
     workspace = Path(args[args.index("-C") + 1])
     assert workspace == Path.cwd()
@@ -41,6 +59,9 @@ if task:
         subprocess.Popen([sys.executable, "-c",
                           "import time; from pathlib import Path; time.sleep(3); "
                           "Path('a.txt').write_text('late background write\\n', encoding='utf-8')"])
+    if mode == "task_temp_probe":
+        assert os.environ["TMP"] == os.environ["TEMP"] == os.environ["TMPDIR"]
+        (Path(os.environ["TMPDIR"]) / "probe.txt").write_text("scratch works", encoding="utf-8")
     if mode == "task_timeout":
         time.sleep(30)
 if mode == "review_file_change":

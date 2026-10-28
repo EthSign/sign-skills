@@ -56,7 +56,7 @@ python3 scripts/invoke-codex.py --mode task --repo /path/to/repo \
   --run-directory /path/outside/repo/task-unique
 ```
 
-Task mode starts from the specified commit (`HEAD` by default). It does not copy uncommitted or ignored files from the source checkout. Codex works in `<run-directory>/worktree` with the native `workspace-write` sandbox, follows applicable project instructions, and can run relevant tests. It returns a structured summary, changed-file list, test outcomes, and limitations. Claude inspects the observed diff and new files before integrating the work.
+Task mode starts from the specified commit (`HEAD` by default). It does not copy uncommitted or ignored files from the source checkout. Codex works in `<run-directory>/worktree` with a restricted native permission profile, follows applicable project instructions, and can run relevant tests. It returns a structured summary, changed-file list, test outcomes, and limitations. Claude inspects the observed diff and new files before integrating the work.
 
 The worktree and partial changes are retained on success, failure, timeout, and interruption. The wrapper never applies them to the original checkout. It separately saves `task-diff.patch`, new file bytes under `task-untracked/`, and hashes/actual changed paths in `task-evidence.json`. These observed artifacts let Claude check the model's claims. Ignored outputs stay in the worktree; exceeding the 64 MiB/250-untracked-file evidence limits makes the run incomplete without discarding work.
 
@@ -65,6 +65,8 @@ The task result is under `result.json.task`; existing review results remain unde
 Task mode retains never-approve policy and suppression of web search, hooks, plugins, apps, additional agents, and host skills. Project instructions are enabled for implementation. The objective must explicitly authorize commits, pushes, publishing, or dependency installation; that restriction is a prompt instruction, not a command filter. Source and task worktrees share Git metadata. The sandbox is not a container or read-access boundary, and running tests executes repository code.
 
 Task commands stay in the foreground. The wrapper stops the Windows job or original POSIX process group before collecting final logs and changes, even after successful parent exit. Windows job setup failure prevents execution; deliberately detached POSIX descendants are outside that process-group guarantee. See the task workflow for details.
+
+Task scratch files use the retained `task-tmp/` directory. A fresh permission profile limits writes to the worktree and scratch directory, protecting sibling logs and results. Two no-model checks require profile selection and validation before execution; managed fallback or incompatible configuration blocks the task. This requires permission-profile support and `app-server --print-startup-config`. Task errors, timeouts, and interruptions retain their original cause and record later failures in `secondary_errors`; a failed termination check never becomes confirmed merely because its Windows job handle was closed.
 
 See [the task workflow](references/task-mode.md) for scope selection, result verification, recovery, and cleanup. A task dry run also retains its prepared worktree; it does not contact a model.
 

@@ -3,11 +3,20 @@
 ## 1.2.0 — 2026-10-28
 
 - Add explicit `--mode task` for Claude Code to delegate implementation and testing to Codex in a retained detached worktree, starting from `--head` or `HEAD`. Review remains the default; its modes and result contract are preserved.
-- Task mode uses `workspace-write`, enables applicable project instructions, accepts file-change events, and validates a task result with changed files, test outcomes, and limitations.
+- Task mode uses a restricted native permission profile, enables applicable project instructions, accepts file-change events, and validates a task result with changed files, test outcomes, and limitations.
 - Preserve task worktrees on success and failure. Capture actual tracked diffs and nonignored new files separately from model-reported changes, with hashes and recovery metadata. Evidence collection errors invalidate completion without deleting partial work.
 - Stop the Windows task job or original POSIX process group before final log parsing and evidence capture, including after successful parent exit. Windows starts suspended until job assignment succeeds. Keep review process handling unchanged.
 - Add task selection, source-preservation, binary-file, failure, interruption, artifact recovery, and schema regression tests. Decode fixture stdin as UTF-8 consistently on Windows.
 - Validate offline behavior and a no-model dry run on Windows using Python 3.12 and `codex-cli 0.165.0-alpha.1.2`. The real task smoke run was blocked by host execution policy and correctly reported incomplete. Successful live edits/tests and native macOS/Linux runs remain unverified.
+
+### Review fixes — 2026-10-29
+
+- Preserve interrupted, timeout, and other primary task failures when evidence collection, cleanup, or artifact publication also fails. Retain secondary diagnostics separately.
+- Distinguish Windows launch failures from cleanup failures and keep failed job termination checks unconfirmed on subsequent cleanup calls.
+- Tolerate disappearing Linux process/thread entries while preserving fail-closed handling of unreadable entries.
+- Limit task writes to its worktree and retained scratch directory through a fresh permission profile, with model-free checks rejecting legacy selection or managed fallback. Set `TEMP`, `TMP`, and `TMPDIR` to scratch. Refuse pre-existing task evidence output paths instead of following them.
+- Add regression tests for the reproduced recovery failures, scratch configuration/environment, Linux disappearance/permission errors, and evidence destination collisions.
+- Validate the final Windows suite: 66 tests, 64 passed and 2 platform skips. The installed CLI passed both no-model permission checks and the task dry run; live task execution remains unverified.
 
 ## 1.1.0 — 2026-10-14
 
