@@ -31,6 +31,7 @@ class RunnerTests(unittest.TestCase):
         self.prompt.write_text("Review this small plan.", encoding="utf-8")
         self.children, self.commands, self.stdin, self.environments = [], [], [], []
         self.permission_preflights = []
+        self.execution_preflights = []
         self.authenticated = True
         self.interrupt = False
         self.stderr = ""
@@ -43,9 +44,11 @@ class RunnerTests(unittest.TestCase):
 
     def fake_popen(self, command, **kwargs):
         # The resolved "codex" is sys.executable; route preflight and exec calls to the offline fixture.
-        if command[0] == sys.executable and command[1] in ("exec", "--version", "login", "app-server"):
+        if command[0] == sys.executable and command[1] in ("exec", "--version", "login", "app-server", "sandbox"):
             if command[1] == "app-server":
                 self.permission_preflights.append((command, kwargs.get("cwd"), kwargs.get("env")))
+            if command[1] == "sandbox":
+                self.execution_preflights.append((command, kwargs.get("cwd"), kwargs.get("env")))
             child = REAL_POPEN([sys.executable, str(FAKE), *command[1:]], **kwargs)
             if command[1] == "exec" and command[2] != "--help":
                 self.commands.append(command)
@@ -748,7 +751,12 @@ class RunnerTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows suspended task launch")
     def test_task_job_assignment_failure_never_executes_task(self):
         repo, _ = self.repository()
-        with patch.object(runner.WindowsTaskJob, "assign_and_resume", side_effect=OSError("fixture job denied")):
+        original_resume = runner.WindowsTaskJob.assign_and_resume
+        def fail_model(job, child):
+            if child in self.children:
+                raise OSError("fixture job denied")
+            return original_resume(job, child)
+        with patch.object(runner.WindowsTaskJob, "assign_and_resume", fail_model):
             code, meta, _ = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
         self.assertEqual(code, 1, meta)
         self.assertFalse(meta["complete"])
@@ -763,7 +771,8 @@ class RunnerTests(unittest.TestCase):
         real_stop = runner.stop_task_tree
         def uncertain(child, job):
             real_stop(child, job)
-            raise runner.ProcessCleanupError("fixture unconfirmed task termination")
+            if child in self.children:
+                raise runner.ProcessCleanupError("fixture unconfirmed task termination")
         with patch.object(runner, "stop_task_tree", side_effect=uncertain):
             code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
         self.assertEqual(code, 1, meta)
@@ -826,10 +835,12 @@ class RunnerTests(unittest.TestCase):
     def test_task_failed_job_confirmation_never_becomes_confirmed(self):
         repo, _ = self.repository()
         original_job = runner.WindowsTaskJob
+        fixture = self
         class QueryFailureJob(original_job):
-            def __init__(self):
-                super().__init__()
-                self.api.QueryInformationJobObject = Mock(side_effect=OSError("fixture accounting unavailable"))
+            def assign_and_resume(self, child):
+                super().assign_and_resume(child)
+                if child in fixture.children:
+                    self.api.QueryInformationJobObject = Mock(side_effect=OSError("fixture accounting unavailable"))
         with patch.object(runner, "WindowsTaskJob", QueryFailureJob):
             code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
         self.assertEqual(code, 1, meta)
@@ -843,8 +854,12 @@ class RunnerTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows suspended launch")
     def test_task_launch_failure_with_successful_cleanup_is_not_cleanup_failure(self):
         repo, _ = self.repository()
-        with patch.object(runner.WindowsTaskJob, "assign_and_resume",
-                          side_effect=runner.TaskLaunchError("fixture thread identification failed")):
+        original_resume = runner.WindowsTaskJob.assign_and_resume
+        def fail_model(job, child):
+            if child in self.children:
+                raise runner.TaskLaunchError("fixture thread identification failed")
+            return original_resume(job, child)
+        with patch.object(runner.WindowsTaskJob, "assign_and_resume", fail_model):
             code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
         self.assertEqual(code, 1, meta)
         self.assertEqual(meta["status"], "error")
@@ -960,6 +975,37 @@ class RunnerTests(unittest.TestCase):
                 self.assertFalse(meta["codex_start_attempted"])
                 self.assertIsNot(meta.get("task_permission_verified"), True)
                 self.assertTrue(Path(meta["task_worktree"]).is_dir())
+        self.assertEqual(self.commands, [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows native execution preflight")
+    def test_task_execution_probe_requires_working_enforced_sandbox(self):
+        repo, _ = self.repository()
+        for mode in ("task_sandbox_blocked", "task_sandbox_missing_marker"):
+            with self.subTest(mode=mode):
+                code, meta, _ = self.invoke(mode, ["--mode", "task", "--repo", str(repo)], name=mode)
+                self.assertEqual(code, 1, meta)
+                self.assertFalse(meta["task_execution_verified"])
+                self.assertFalse(meta["codex_start_attempted"])
+                self.assertTrue(meta["task_permission_verified"])
+                self.assertTrue(meta["worktree_retained"])
+        self.assertEqual(self.commands, [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows native execution preflight")
+    def test_task_dry_run_explicitly_selects_mxc_and_checks_execution(self):
+        repo, _ = self.repository()
+        code, meta, _ = self.invoke(extra=["--mode", "task", "--repo", str(repo), "--dry-run"])
+        self.assertEqual(code, 0, meta)
+        self.assertTrue(meta["task_execution_verified"])
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(len(self.execution_preflights), 1)
+        command, cwd, environment = self.execution_preflights[0]
+        self.assertIn('windows.sandbox="mxc"', command)
+        self.assertIn("--include-managed-config", command)
+        self.assertEqual(command[command.index("--permission-profile") + 1], meta["task_permission_profile"])
+        self.assertEqual(cwd, Path(meta["task_worktree"]))
+        self.assertEqual(environment["TMPDIR"], meta["task_tmp_directory"])
+        self.assertIn("-I", command)
+        self.assertIn("-S", command)
         self.assertEqual(self.commands, [])
 
     def test_task_evidence_refuses_preexisting_output_directory_or_file(self):

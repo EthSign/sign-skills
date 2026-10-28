@@ -7,7 +7,7 @@
 - Preserve task worktrees on success and failure. Capture actual tracked diffs and nonignored new files separately from model-reported changes, with hashes and recovery metadata. Evidence collection errors invalidate completion without deleting partial work.
 - Stop the Windows task job or original POSIX process group before final log parsing and evidence capture, including after successful parent exit. Windows starts suspended until job assignment succeeds. Keep review process handling unchanged.
 - Add task selection, source-preservation, binary-file, failure, interruption, artifact recovery, and schema regression tests. Decode fixture stdin as UTF-8 consistently on Windows.
-- Validate offline behavior and a no-model dry run on Windows using Python 3.12 and `codex-cli 0.165.0-alpha.1.2`. The real task smoke run was blocked by host execution policy and correctly reported incomplete. Successful live edits/tests and native macOS/Linux runs remain unverified.
+- Validate offline behavior and no-model dry runs on Windows using Python 3.12 and `codex-cli 0.165.0-alpha.1.2`. The initial real task smoke run was blocked because ignoring user config dropped the Windows sandbox backend; it correctly reported incomplete. See the Windows fix below. Model-driven edits/project tests and native macOS/Linux runs remain unverified.
 
 ### Review fixes — 2026-10-29
 
@@ -17,6 +17,13 @@
 - Limit task writes to its worktree and retained scratch directory through a fresh permission profile, with model-free checks rejecting legacy selection or managed fallback. Set `TEMP`, `TMP`, and `TMPDIR` to scratch. Refuse pre-existing task evidence output paths instead of following them.
 - Add regression tests for the reproduced recovery failures, scratch configuration/environment, Linux disappearance/permission errors, and evidence destination collisions.
 - Validate the final Windows suite: 66 tests, 64 passed and 2 platform skips. The installed CLI passed both no-model permission checks and the task dry run; live task execution remains unverified.
+
+### Windows execution fix — 2026-10-29
+
+- Explicitly select MXC for native Windows task mode. `--ignore-user-config` had removed the configured backend; with approvals disabled, Codex rejected all commands, including file reads.
+- Before any model call, exercise real schema reads, worktree/scratch writes, and artifact write denial through the native sandbox under a Windows Job Object. Isolated Python runs only the wrapper's probe. Record `task_execution_verified`; refuse unavailable or unenforceable sandbox configurations without a fallback.
+- Validate the native wrapper dry run on this Windows host: both permission selection and actual sandbox execution passed without a model call. Model-driven implementation and project tests remain pending.
+- Verify PowerShell file reads and `git status` under the corrected profile and Job Object. The Windows offline suite passed 66 tests with 2 platform skips (68 total).
 
 ## 1.1.0 — 2026-10-14
 

@@ -40,6 +40,13 @@ if args[0] == "app-server":
         sys.exit(1)
     print(json.dumps({"appServerVersion": "0.0.0-offline", "configRequirements": {}}))
     sys.exit(0)
+if args[0] == "sandbox":
+    if mode == "task_sandbox_blocked":
+        print("native MXC is unavailable", file=sys.stderr)
+        sys.exit(1)
+    if mode != "task_sandbox_missing_marker":
+        print("SANDBOX_PROBE_OK")
+    sys.exit(0)
 assert args[0] == "exec", args
 if mode == "no_stdin":
     time.sleep(30)

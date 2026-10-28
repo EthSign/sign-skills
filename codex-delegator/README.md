@@ -68,6 +68,8 @@ Task commands stay in the foreground. The wrapper stops the Windows job or origi
 
 Task scratch files use the retained `task-tmp/` directory. A fresh permission profile limits writes to the worktree and scratch directory, protecting sibling logs and results. Two no-model checks require profile selection and validation before execution; managed fallback or incompatible configuration blocks the task. This requires permission-profile support and `app-server --print-startup-config`. Task errors, timeouts, and interruptions retain their original cause and record later failures in `secondary_errors`; a failed termination check never becomes confirmed merely because its Windows job handle was closed.
 
+Native Windows task mode requires MXC support and selects it explicitly, since ignoring user configuration also removes the user's Windows sandbox selection. Before starting a model, a trusted no-model probe checks real reads, task-directory writes, and artifact write denial under the task's Job Object. An unavailable backend stops preflight. The wrapper does not provision the legacy sandbox or fall back to weaker enforcement.
+
 See [the task workflow](references/task-mode.md) for scope selection, result verification, recovery, and cleanup. A task dry run also retains its prepared worktree; it does not contact a model.
 
 ### Code-grounded reviews

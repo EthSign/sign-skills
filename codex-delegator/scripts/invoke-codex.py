@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 VERSION = "1.2.0"
 MAX_BYTES = 64 * 1024 * 1024
@@ -356,7 +357,7 @@ def cleanup_signals():
                 signal.signal(number, handler)
 
 
-def run_capture(command, *, timeout, cwd=None, data=None, env=None):
+def run_capture(command, *, timeout, cwd=None, data=None, env=None, task_tree=False):
     # Files, not PIPEs: an inherited grandchild handle must not make post-timeout
     # communicate() wait indefinitely for EOF after the direct process is killed.
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors, \
@@ -364,15 +365,23 @@ def run_capture(command, *, timeout, cwd=None, data=None, env=None):
         if data is not None:
             source.write(data)
             source.seek(0)
-        child = subprocess.Popen(command, cwd=cwd, stdin=source, stdout=output, stderr=errors,
-                                 start_new_session=os.name != "nt",
-                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                                 **({"env": env} if env is not None else {}))
+        job = WindowsTaskJob() if task_tree and os.name == "nt" else None
+        child = None
         try:
+            child = subprocess.Popen(command, cwd=cwd, stdin=source, stdout=output, stderr=errors,
+                                     start_new_session=os.name != "nt",
+                                     creationflags=(subprocess.CREATE_NO_WINDOW | (0x00000004 if task_tree else 0))
+                                     if os.name == "nt" else 0,
+                                     **({"env": env} if env is not None else {}))
+            if job is not None:
+                job.assign_and_resume(child)
             child.wait(timeout=timeout)
         finally:
             with cleanup_signals():
-                stop_child(child)
+                if task_tree:
+                    stop_task_tree(child, job)
+                elif child is not None:
+                    stop_child(child)
         output.seek(0)
         errors.seek(0)
         return subprocess.CompletedProcess(command, child.returncode, output.read(), errors.read())
@@ -405,6 +414,57 @@ def verify_task_permissions(executable, config_values, profile, execution, envir
               or not isinstance(payload.get("appServerVersion"), str)
               or not isinstance(payload.get("configRequirements"), dict)):
             raise ValueError("Restricted task permission profile could not be validated; refusing model execution")
+
+
+def verify_task_execution(executable, config_values, profile, execution, scratch, schema, environment):
+    """Exercise native MXC boundaries without a model or any repository code."""
+    python = Path(sys.executable).resolve(strict=True)
+    if not python.is_file():
+        raise ValueError("A trusted native Python executable is required for task sandbox verification")
+    # Isolated Python disables cwd/site imports, so repository modules cannot run.
+    probe = """import pathlib, sys
+schema, worktree, scratch, artifacts = map(pathlib.Path, sys.argv[1:5])
+name = sys.argv[5]
+owned = []
+try:
+    if not schema.read_bytes():
+        raise RuntimeError("Wrapper schema is empty")
+    for root in (worktree, scratch):
+        target = root / name
+        with target.open("xb") as stream:
+            owned.append(target)
+            stream.write(b"sandbox-probe")
+        if target.read_bytes() != b"sandbox-probe":
+            raise RuntimeError("Task sandbox sentinel readback failed")
+    target = artifacts / name
+    try:
+        stream = target.open("xb")
+    except PermissionError:
+        pass
+    else:
+        owned.append(target)
+        stream.close()
+        raise RuntimeError("Wrapper artifact directory is writable inside the task sandbox")
+    print("SANDBOX_PROBE_OK")
+finally:
+    for target in reversed(owned):
+        target.unlink()
+"""
+    command = [executable, "sandbox", "--permission-profile", profile,
+               "--include-managed-config", "-C", str(execution)]
+    for value in config_values:
+        command.extend(["-c", value])
+    command.extend(["--", str(python), "-I", "-S", "-c", probe, str(schema), str(execution),
+                    str(scratch), str(schema.parent), ".codex-delegator-probe-" + uuid.uuid4().hex])
+    try:
+        result = run_capture(command, timeout=PREFLIGHT_TIMEOUT, cwd=execution,
+                             env=environment, task_tree=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Native Windows task sandbox verification timed out; no model was started") from exc
+    if result.returncode or result.stdout.decode("utf-8", "replace").strip() != "SANDBOX_PROBE_OK":
+        detail = result.stderr.decode("utf-8", "replace").strip()[:2000]
+        raise ValueError("Native Windows task sandbox verification failed; MXC must be available and allowed "
+                         "by managed policy. No model was started." + (" " + detail if detail else ""))
 
 
 def git(repo, *args, data=None):
@@ -663,7 +723,7 @@ def run(args):
         meta.update(mode="task", task_worktree=None, worktree_retained=False,
                     task_tmp_directory=None, task_tmp_retained=False,
                     task_permission_profile="codex-delegator-task-" + os.urandom(12).hex(),
-                    task_permission_verified=False)
+                    task_permission_verified=False, task_execution_verified=False)
     child = None
     task_job = None
     task_tree_stopped = False
@@ -863,6 +923,8 @@ def run(args):
                 prefix + "network.enabled=false",
                 "shell_environment_policy.set={" + ", ".join(
                     name + "=" + json.dumps(value) for name, value in temp_environment.items()) + "}"])
+            if os.name == "nt":
+                config_values.append('windows.sandbox="mxc"')
         else:
             command[6:6] = ["--sandbox", "read-only"]
             config_values.append("project_doc_max_bytes=0")
@@ -878,6 +940,10 @@ def run(args):
         if task_mode:
             verify_task_permissions(executable, config_values, profile, execution, task_environment)
             meta["task_permission_verified"] = True
+            if os.name == "nt":
+                verify_task_execution(executable, config_values, profile, execution, task_tmp,
+                                      schema_path, task_environment)
+                meta["task_execution_verified"] = True
             write_json(run_dir / "preflight.json", meta)
             write_json(status_path, meta)
         if args.dry_run:
@@ -1005,6 +1071,7 @@ def run(args):
         "artifact_errors", "status_before_artifact_error", "review_parse_error", "task_parse_error",
         "task_worktree", "worktree_retained", "task_tmp_directory", "task_tmp_retained",
         "task_permission_profile", "task_permission_verified",
+        "task_execution_verified",
         "task_collection_error", "process_cleanup_error", "secondary_errors")}, indent=2))
     return 0 if meta["complete"] or meta["status"] in ("dry_run", "no_changes") else 1
 
