@@ -901,6 +901,81 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("task_collection_error", meta)
         self.assertTrue(meta["worktree_retained"])
 
+    def test_task_timeout_survives_late_read_error_or_interrupt(self):
+        repo, _ = self.repository()
+        for exception in (PermissionError("fixture unreadable stream"), KeyboardInterrupt("fixture late interrupt")):
+            with self.subTest(error=type(exception).__name__), patch.object(runner, "read_events", side_effect=exception):
+                code, meta, directory = self.invoke("task_timeout", ["--mode", "task", "--repo", str(repo),
+                                                                   "--timeout-seconds", "1"], name=type(exception).__name__)
+                self.assertEqual(code, 1, meta)
+                self.assertEqual(meta["status"], "timeout")
+                self.assertEqual(self.status(directory), "timeout")
+                self.assertTrue(meta["secondary_errors"])
+                self.assertIn(str(exception), meta["error"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sandbox probe cleanup")
+    def test_task_probe_timeout_leaves_no_probe_files_in_evidence(self):
+        repo, _ = self.repository()
+        original_capture, original_unlink = runner.run_capture, Path.unlink
+        def stalled_probe(command, **kwargs):
+            if command[1] == "sandbox":
+                for root in (Path(command[-4]), Path(command[-3])):
+                    (root / command[-1]).write_bytes(b"sandbox-probe")
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return original_capture(command, **kwargs)
+        def uninterrupted_unlink(path, *args, **kwargs):
+            if path.name.startswith(".codex-delegator-probe-") and path.exists():
+                self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+            return original_unlink(path, *args, **kwargs)
+        with patch.object(runner, "run_capture", side_effect=stalled_probe), \
+                patch.object(Path, "unlink", uninterrupted_unlink):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(list(Path(meta["task_worktree"]).glob(".codex-delegator-probe-*")), [])
+        self.assertEqual(list(Path(meta["task_tmp_directory"]).glob(".codex-delegator-probe-*")), [])
+        self.assertEqual(meta["task_evidence"]["actual_changed_files"], [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sandbox probe cleanup")
+    def test_task_probe_uncertain_termination_preserves_files_and_withholds_evidence(self):
+        repo, _ = self.repository()
+        original_capture = runner.run_capture
+        def uncertain_probe(command, **kwargs):
+            if command[1] == "sandbox":
+                (Path(command[-4]) / command[-1]).write_bytes(b"sandbox-probe")
+                raise runner.ProcessCleanupError("fixture probe termination uncertain")
+            return original_capture(command, **kwargs)
+        with patch.object(runner, "run_capture", side_effect=uncertain_probe):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(len(list(Path(meta["task_worktree"]).glob(".codex-delegator-probe-*"))), 1)
+        self.assertNotIn("task_evidence", meta)
+        self.assertFalse((directory / "task-evidence.json").exists())
+        shutil.rmtree(meta["retained_temp_directory"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sandbox probe cleanup")
+    def test_task_probe_cleanup_failure_never_publishes_probe_as_task_output(self):
+        repo, _ = self.repository()
+        original_capture, original_unlink = runner.run_capture, Path.unlink
+        def failed_probe(command, **kwargs):
+            if command[1] == "sandbox":
+                (Path(command[-4]) / command[-1]).write_bytes(b"sandbox-probe")
+                return subprocess.CompletedProcess(command, 1, b"", b"fixture probe failed")
+            return original_capture(command, **kwargs)
+        def locked_probe(path, *args, **kwargs):
+            if path.name.startswith(".codex-delegator-probe-") and path.exists():
+                raise PermissionError("fixture probe file locked")
+            return original_unlink(path, *args, **kwargs)
+        with patch.object(runner, "run_capture", side_effect=failed_probe), patch.object(Path, "unlink", locked_probe):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertIn("task_probe_cleanup_error", meta)
+        self.assertNotIn("process_cleanup_error", meta)
+        self.assertNotIn("task_evidence", meta)
+        self.assertFalse((directory / "task-evidence.json").exists())
+
     def test_linux_disappearing_threads_are_tolerated_but_unreadable_threads_fail_closed(self):
         # Exercise Linux error handling without requiring a Linux host or killing real processes.
         class ProcEntry:

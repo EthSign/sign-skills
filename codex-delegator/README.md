@@ -70,6 +70,8 @@ Task scratch files use the retained `task-tmp/` directory. A fresh permission pr
 
 Native Windows task mode requires MXC support and selects it explicitly, since ignoring user configuration also removes the user's Windows sandbox selection. Before starting a model, a trusted no-model probe checks real reads, task-directory writes, and artifact write denial under the task's Job Object. An unavailable backend stops preflight. The wrapper does not provision the legacy sandbox or fall back to weaker enforcement.
 
+Task materialization and evidence collection suppress configured Git clean, smudge, and process filters, preventing task-controlled attributes from running filter commands outside the sandbox. Filter-backed content such as Git LFS objects is not expanded automatically. Interrupted probes are cleaned by exact filename after confirmed termination; unresolved cleanup withholds task evidence.
+
 See [the task workflow](references/task-mode.md) for scope selection, result verification, recovery, and cleanup. A task dry run also retains its prepared worktree; it does not contact a model.
 
 ### Code-grounded reviews

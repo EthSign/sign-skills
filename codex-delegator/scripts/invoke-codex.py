@@ -66,6 +66,10 @@ class TaskLaunchError(RuntimeError):
     pass
 
 
+class TaskProbeCleanupError(RuntimeError):
+    pass
+
+
 def record_failure(meta, status, **details):
     """Keep the first terminal task cause while recording secondary failures."""
     previous = meta.get("status")
@@ -379,7 +383,10 @@ def run_capture(command, *, timeout, cwd=None, data=None, env=None, task_tree=Fa
         finally:
             with cleanup_signals():
                 if task_tree:
-                    stop_task_tree(child, job)
+                    try:
+                        stop_task_tree(child, job)
+                    except Exception as exc:
+                        raise ProcessCleanupError(f"Probe process termination was not confirmed: {exc}") from exc
                 elif child is not None:
                     stop_child(child)
         output.seek(0)
@@ -454,47 +461,93 @@ finally:
                "--include-managed-config", "-C", str(execution)]
     for value in config_values:
         command.extend(["-c", value])
+    probe_name = ".codex-delegator-probe-" + uuid.uuid4().hex
+    probe_paths = [root / probe_name for root in (execution, scratch, schema.parent)]
+    if any(os.path.lexists(path) for path in probe_paths):
+        raise ValueError("Task sandbox probe filename already exists; refusing to overwrite it")
     command.extend(["--", str(python), "-I", "-S", "-c", probe, str(schema), str(execution),
-                    str(scratch), str(schema.parent), ".codex-delegator-probe-" + uuid.uuid4().hex])
+                    str(scratch), str(schema.parent), probe_name])
+    termination_confirmed = True
     try:
         result = run_capture(command, timeout=PREFLIGHT_TIMEOUT, cwd=execution,
                              env=environment, task_tree=True)
+    except ProcessCleanupError:
+        termination_confirmed = False
+        raise
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Native Windows task sandbox verification timed out; no model was started") from exc
+    finally:
+        if termination_confirmed:
+            # The sandbox child may have been killed before its own finally ran.
+            # These fresh names belong to this probe; never sweep by a glob.
+            failures = []
+            with cleanup_signals():
+                for path in probe_paths:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        failures.append(f"{path}: {type(exc).__name__}: {exc}")
+            if failures:
+                raise TaskProbeCleanupError("Task probe files could not be removed: " + "; ".join(failures))
     if result.returncode or result.stdout.decode("utf-8", "replace").strip() != "SANDBOX_PROBE_OK":
         detail = result.stderr.decode("utf-8", "replace").strip()[:2000]
         raise ValueError("Native Windows task sandbox verification failed; MXC must be available and allowed "
                          "by managed policy. No model was started." + (" " + detail if detail else ""))
 
 
-def git(repo, *args, data=None):
+def git(repo, *args, data=None, task_filters=False):
     # Never execute hooks, external diff drivers, textconv, or fsmonitor helpers.
-    command = [git_executable(), "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
-               "-C", str(repo), *args]
+    prefix = [git_executable(), "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
+              "-C", str(repo)]
+    command = [*prefix, *args]
+    if task_filters:
+        # Attributes are task-controlled data. Never execute their configured
+        # external filters while the host materializes or collects task bytes.
+        # Resolve in this repository context on every call, including worktree-
+        # specific and includeIf configuration; no persistent config is changed.
+        query = run_capture(prefix + ["config", "--null", "--name-only", "--get-regexp",
+                            r"^filter\..*\.(clean|smudge|process|required)$"], timeout=GIT_TIMEOUT)
+        if query.returncode not in (0, 1):
+            raise RuntimeError("Git filter configuration query failed: " + query.stderr.decode("utf-8", "replace")[:2000])
+        drivers = {key.decode("utf-8")[len("filter."):].rsplit(".", 1)[0]
+                   for key in query.stdout.split(b"\0") if key}
+        if any(not driver or "=" in driver or any(ord(char) < 32 or ord(char) == 127 for char in driver)
+               for driver in drivers):
+            # Git's -c interface separates key/value at the first '='. Never
+            # mis-serialize a subsection and accidentally leave its driver live.
+            raise ValueError("Unsupported configured Git filter driver name; task collection refuses to execute filters")
+        overrides = []
+        for driver in sorted(drivers):
+            for operation in ("clean", "smudge", "process"):
+                overrides.extend(["-c", f"filter.{driver}.{operation}="])
+            overrides.extend(["-c", f"filter.{driver}.required=false"])
+        command[1:1] = overrides
     result = run_capture(command, timeout=GIT_TIMEOUT, data=data)
     if result.returncode:
         raise RuntimeError("Git failed: " + result.stderr.decode("utf-8", "replace")[:2000])
     return result.stdout
 
 
-def revision(repo, name):
-    return git(repo, "rev-parse", "--verify", "--end-of-options", name + "^{commit}").decode().strip()
+def revision(repo, name, task_filters=False):
+    return git(repo, "rev-parse", "--verify", "--end-of-options", name + "^{commit}",
+               task_filters=task_filters).decode().strip()
 
 
-def patch(repo, *revs):
+def patch(repo, *revs, task_filters=False):
     return git(repo, "diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index",
-               "--src-prefix=a/", "--dst-prefix=b/", *revs, "--")
+               "--src-prefix=a/", "--dst-prefix=b/", *revs, "--", task_filters=task_filters)
 
 
-def capture_working(repo, baseline=None):
-    head = baseline or revision(repo, "HEAD")
-    added = git(repo, "diff", "--cached", "--name-only", "--diff-filter=A", "-z", head, "--").split(b"\0")
+def capture_working(repo, baseline=None, task_filters=False):
+    head = baseline or revision(repo, "HEAD", task_filters=task_filters)
+    added = git(repo, "diff", "--cached", "--name-only", "--diff-filter=A", "-z", head, "--",
+                task_filters=task_filters).split(b"\0")
     if any(name and not os.path.lexists(repo / os.fsdecode(name)) for name in added):
         raise ValueError("A staged addition was deleted from disk; commit or resolve the index/worktree discrepancy first")
-    diff = patch(repo, head)
+    diff = patch(repo, head, task_filters=task_filters)
     if len(diff) > MAX_BYTES:
         raise ValueError("Working-tree diff exceeds 64 MiB; narrow the review.")
-    names = git(repo, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
+    names = git(repo, "ls-files", "--others", "--exclude-standard", "-z", task_filters=task_filters).split(b"\0")
     names = [os.fsdecode(name) for name in names if name]
     if len(names) > 250:
         raise ValueError("More than 250 untracked files; narrow the review.")
@@ -516,10 +569,11 @@ def capture_working(repo, baseline=None):
 
 def collect_task_evidence(worktree, baseline, run_dir):
     """Save observed bytes independently of the model's claimed changed_files."""
-    head, diff, files, fingerprint = capture_working(worktree, baseline=baseline)
-    current_head = revision(worktree, "HEAD")
+    head, diff, files, fingerprint = capture_working(worktree, baseline=baseline, task_filters=True)
+    current_head = revision(worktree, "HEAD", task_filters=True)
     tracked = [os.fsdecode(name) for name in git(
-        worktree, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", head, "--").split(b"\0") if name]
+        worktree, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", head, "--",
+        task_filters=True).split(b"\0") if name]
     evidence_root = run_dir / "task-untracked"
     # Exclusive creation rejects existing directories, files, symlinks, and reparse
     # points. Never resolve an attacker-supplied evidence root into the trust base.
@@ -537,7 +591,8 @@ def collect_task_evidence(worktree, baseline, run_dir):
             artifact.write(data)
         manifest[name] = {"sha256": digest(data), "bytes": len(data),
                           "executable": os.name != "nt" and bool((worktree / name).stat().st_mode & 0o111)}
-    if capture_working(worktree, baseline=baseline)[3] != fingerprint or revision(worktree, "HEAD") != current_head:
+    if (capture_working(worktree, baseline=baseline, task_filters=True)[3] != fingerprint
+            or revision(worktree, "HEAD", task_filters=True) != current_head):
         raise ValueError("Task worktree changed while collecting evidence")
     evidence = {"baseline_head": head, "current_head": current_head,
                 "diff_artifact": patch_path.name, "diff_sha256": digest(diff),
@@ -825,8 +880,16 @@ def run(args):
                 # can still leave recoverable work, so this path is never force-removed.
                 write_json(status_path, meta)
             worktree_attempted = True
-            git(repo, "worktree", "add", "--detach", str(snapshot), head)
+            if task_mode:
+                git(repo, "worktree", "add", "--no-checkout", "--detach", str(snapshot), head,
+                    task_filters=True)
+            else:
+                git(repo, "worktree", "add", "--detach", str(snapshot), head)
             worktree_added = True
+            if task_mode:
+                # Re-resolve filters after entering the new Git worktree context.
+                # This also avoids smudging LFS pointers before raw evidence capture.
+                git(snapshot, "reset", "--hard", head, task_filters=True)
             if mode == "working-tree":
                 if diff:
                     git(snapshot, "apply", "--index", "--binary", "--whitespace=nowarn", "-", data=diff)
@@ -1008,12 +1071,14 @@ def run(args):
         record_failure(meta, "cleanup_failed", process_cleanup_error=str(exc))
         if task_mode:
             meta["task_process_tree_terminated"] = False
+    except TaskProbeCleanupError as exc:
+        record_failure(meta, "error", task_probe_cleanup_error=str(exc))
     except KeyboardInterrupt as exc:
         # SIGINT, or SIGTERM via the entry-point handler. A started call may already have used model allowance.
-        meta.update(status="interrupted", complete=False,
+        record_failure(meta, "interrupted",
                     error=("Task" if task_mode else "Review") + " interrupted; do not automatically retry" + (f" ({exc})" if str(exc) else ""))
     except Exception as exc:
-        meta.update(status="error", complete=False, error=f"{type(exc).__name__}: {exc}")
+        record_failure(meta, "error", error=f"{type(exc).__name__}: {exc}")
     finally:
         with cleanup_signals():
             if (child is not None or task_job is not None) and not task_tree_stopped:
@@ -1040,6 +1105,8 @@ def run(args):
                 try:
                     if meta.get("process_cleanup_error") or (child is not None and child.poll() is None):
                         raise RuntimeError("Child termination unconfirmed; task evidence cannot be frozen")
+                    if meta.get("task_probe_cleanup_error"):
+                        raise RuntimeError("Probe cleanup failed; do not publish probe files as task evidence")
                     if not worktree_added:
                         raise RuntimeError("Worktree setup was not confirmed; inspect retained path and Git registration")
                     evidence = collect_task_evidence(snapshot, task_baseline, run_dir)
@@ -1072,7 +1139,7 @@ def run(args):
         "task_worktree", "worktree_retained", "task_tmp_directory", "task_tmp_retained",
         "task_permission_profile", "task_permission_verified",
         "task_execution_verified",
-        "task_collection_error", "process_cleanup_error", "secondary_errors")}, indent=2))
+        "task_collection_error", "task_probe_cleanup_error", "process_cleanup_error", "secondary_errors")}, indent=2))
     return 0 if meta["complete"] or meta["status"] in ("dry_run", "no_changes") else 1
 
 

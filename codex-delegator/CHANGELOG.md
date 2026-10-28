@@ -25,6 +25,14 @@
 - Validate the native wrapper dry run on this Windows host: both permission selection and actual sandbox execution passed without a model call. Model-driven implementation and project tests remain pending.
 - Verify PowerShell file reads and `git status` under the corrected profile and Job Object. The Windows offline suite passed 66 tests with 2 platform skips (68 total).
 
+### Follow-up Claude review fixes — 2026-10-29
+
+- Disable configured Git clean, smudge, and process filters for task materialization and evidence collection. Materialize only after resolving filters in the new worktree context; preserve consistent unexpanded LFS/filter content and prevent task-selected attributes from launching host filter commands.
+- Preserve task timeouts when later stream/file reads fail or an interrupt arrives during result parsing.
+- Reclaim the probe's exact temporary files after confirmed termination, including timeout. Retain files and withhold task evidence when process termination or file cleanup is unresolved.
+- Clarify unsupported evidence paths and index discrepancies. Keep default review behavior and intentional evidence limits unchanged.
+- Validate 78 offline tests on Windows (76 passed, 2 platform skips), the native no-model task dry run, and a focused final probe-cleanup signal check. Claude's review completed with limited coverage: it read the runner and documentation but did not inspect the actual diff or tests.
+
 ## 1.1.0 — 2026-10-14
 
 Brings the process hardening and ergonomics of `claude-delegator` 8.x to this skill and adds code-grounded reviews. Collab mode and an executor helper are out of scope; the default model (Codex's built-in choice) and `medium` effort are unchanged.
