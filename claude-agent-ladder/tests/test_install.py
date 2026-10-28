@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install.py"
 BEGIN = "<!-- claude-agent-ladder:begin -->"
 END = "<!-- claude-agent-ladder:end -->"
-NAMES = ["deep-worker", "explorer", "fast-worker", "planner", "scout", "std-worker", "verifier"]
+NAMES = ["deep-worker", "explorer", "std-worker", "verifier"]
 
 
 def sha(data: bytes) -> str:
@@ -61,52 +61,52 @@ class InstallTests(unittest.TestCase):
         before = self.claude_md.read_bytes()
         r = self.run_install()
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.count(": unchanged"), 9)
+        self.assertEqual(r.stdout.count(": unchanged"), 6)
         self.assertIn("claude-agent-ladder.manifest.json: unchanged", r.stdout)
         self.assertNotIn("created", r.stdout)
         self.assertEqual(self.claude_md.read_bytes(), before)
 
     def test_upgrade_path(self):
         self.run_install()
-        old = b"old version of scout\n"
-        (self.agents / "scout.md").write_bytes(old)
+        old = b"old version of explorer\n"
+        (self.agents / "explorer.md").write_bytes(old)
         data = json.loads(self.manifest.read_text(encoding="utf-8"))
-        data["agents"]["scout.md"] = sha(old)
+        data["agents"]["explorer.md"] = sha(old)
         self.manifest.write_text(json.dumps(data), encoding="utf-8")
         r = self.run_install()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("agents/scout.md: updated", r.stdout)
-        self.assertEqual((self.agents / "scout.md").read_bytes(), self.src("scout"))
-        self.assertFalse((self.agents / "scout.md.bak").exists())
+        self.assertIn("agents/explorer.md: updated", r.stdout)
+        self.assertEqual((self.agents / "explorer.md").read_bytes(), self.src("explorer"))
+        self.assertFalse((self.agents / "explorer.md.bak").exists())
 
     def test_foreign_file_skipped(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
+        (self.agents / "explorer.md").write_text("mine", encoding="utf-8")
         r = self.run_install()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("agents/scout.md: skipped: modified locally", r.stdout)
+        self.assertIn("agents/explorer.md: skipped: modified locally", r.stdout)
         self.assertIn("done with conflicts", r.stdout)
-        self.assertEqual((self.agents / "scout.md").read_text(encoding="utf-8"), "mine")
-        self.assertNotIn("scout.md", json.loads(self.manifest.read_text(encoding="utf-8"))["agents"])
-        self.assertTrue((self.agents / "explorer.md").exists())
+        self.assertEqual((self.agents / "explorer.md").read_text(encoding="utf-8"), "mine")
+        self.assertNotIn("explorer.md", json.loads(self.manifest.read_text(encoding="utf-8"))["agents"])
+        self.assertTrue((self.agents / "std-worker.md").exists())
 
     def test_force_backs_up(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
+        (self.agents / "explorer.md").write_text("mine", encoding="utf-8")
         r = self.run_install("--force")
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("agents/scout.md: replaced, backup at agents/scout.md.bak", r.stdout)
-        self.assertEqual((self.agents / "scout.md.bak").read_text(encoding="utf-8"), "mine")
-        self.assertEqual((self.agents / "scout.md").read_bytes(), self.src("scout"))
+        self.assertIn("agents/explorer.md: replaced, backup at agents/explorer.md.bak", r.stdout)
+        self.assertEqual((self.agents / "explorer.md.bak").read_text(encoding="utf-8"), "mine")
+        self.assertEqual((self.agents / "explorer.md").read_bytes(), self.src("explorer"))
 
     def test_force_existing_bak_uses_numbered(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
-        (self.agents / "scout.md.bak").write_text("older", encoding="utf-8")
+        (self.agents / "explorer.md").write_text("mine", encoding="utf-8")
+        (self.agents / "explorer.md.bak").write_text("older", encoding="utf-8")
         r = self.run_install("--force")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual((self.agents / "scout.md.bak").read_text(encoding="utf-8"), "older")
-        self.assertEqual((self.agents / "scout.md.bak.1").read_text(encoding="utf-8"), "mine")
+        self.assertEqual((self.agents / "explorer.md.bak").read_text(encoding="utf-8"), "older")
+        self.assertEqual((self.agents / "explorer.md.bak.1").read_text(encoding="utf-8"), "mine")
 
     def test_preserves_surrounding_crlf(self):
         pre, post = "# Mine\r\nline\r\n", "\r\n## After\r\nend\r\n"
@@ -168,30 +168,30 @@ class InstallTests(unittest.TestCase):
     def test_dry_run_writes_nothing(self):
         r = self.run_install("--dry-run", "--workflow-size", "medium")
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("would agents/scout.md: created", r.stdout)
+        self.assertIn("would agents/explorer.md: created", r.stdout)
         self.assertEqual(list(self.dir.iterdir()), [])
 
     def test_uninstall(self):
         self.claude_md.write_text("keep me\n", encoding="utf-8")
         self.run_install("--workflow-size", "large")
-        (self.agents / "scout.md").write_text("edited", encoding="utf-8")
+        (self.agents / "explorer.md").write_text("edited", encoding="utf-8")
         (self.agents / "other.md").write_text("unrelated", encoding="utf-8")
         settings = (self.dir / "settings.json").read_bytes()
         r = self.run_install("--uninstall")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("workflowSizeGuideline: left as is", r.stdout)
-        self.assertEqual(sorted(p.name for p in self.agents.iterdir()), ["other.md", "scout.md"])
-        self.assertEqual((self.agents / "scout.md").read_text(encoding="utf-8"), "edited")
+        self.assertEqual(sorted(p.name for p in self.agents.iterdir()), ["explorer.md", "other.md"])
+        self.assertEqual((self.agents / "explorer.md").read_text(encoding="utf-8"), "edited")
         self.assertEqual(self.claude_md.read_text(encoding="utf-8"), "keep me\n")
         self.assertFalse(self.manifest.exists())
         self.assertEqual((self.dir / "settings.json").read_bytes(), settings)
 
     def test_uninstall_force_removes_modified(self):
         self.run_install()
-        (self.agents / "scout.md").write_text("edited", encoding="utf-8")
+        (self.agents / "explorer.md").write_text("edited", encoding="utf-8")
         r = self.run_install("--uninstall", "--force")
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertFalse((self.agents / "scout.md").exists())
+        self.assertFalse((self.agents / "explorer.md").exists())
 
     def test_no_rules(self):
         self.claude_md.write_text("untouched", encoding="utf-8")
@@ -206,7 +206,7 @@ class InstallTests(unittest.TestCase):
     def test_env_config_dir(self):
         r = self.run_install(env={"CLAUDE_CONFIG_DIR": str(self.dir)}, with_dir=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue((self.agents / "scout.md").exists())
+        self.assertTrue((self.agents / "explorer.md").exists())
 
     # ---- review fixes ----
 
@@ -259,19 +259,19 @@ class InstallTests(unittest.TestCase):
 
     def test_symlinked_agent_updated(self):
         self.run_install()
-        old = b"old scout\n"
-        real = self.dir / "elsewhere" / "scout-real.md"
+        old = b"old explorer\n"
+        real = self.dir / "elsewhere" / "explorer-real.md"
         real.parent.mkdir()
         real.write_bytes(old)
-        (self.agents / "scout.md").unlink()
-        self.link(self.agents / "scout.md", real)
+        (self.agents / "explorer.md").unlink()
+        self.link(self.agents / "explorer.md", real)
         data = json.loads(self.manifest.read_text(encoding="utf-8"))
-        data["agents"]["scout.md"] = sha(old)
+        data["agents"]["explorer.md"] = sha(old)
         self.manifest.write_text(json.dumps(data), encoding="utf-8")
         r = self.run_install()
-        self.assertIn("agents/scout.md: updated", r.stdout)
-        self.assertTrue((self.agents / "scout.md").is_symlink())
-        self.assertEqual(real.read_bytes(), self.src("scout"))
+        self.assertIn("agents/explorer.md: updated", r.stdout)
+        self.assertTrue((self.agents / "explorer.md").is_symlink())
+        self.assertEqual(real.read_bytes(), self.src("explorer"))
 
     def test_fenced_markers_ignored(self):
         fenced = f"```\n{BEGIN}\nfoo\n{END}\n```\n"
@@ -385,16 +385,16 @@ class InstallTests(unittest.TestCase):
 
     def test_dry_run_force_over_conflict(self):
         self.agents.mkdir()
-        (self.agents / "scout.md").write_text("mine", encoding="utf-8")
+        (self.agents / "explorer.md").write_text("mine", encoding="utf-8")
         before = self.snapshot()
         r = self.run_install("--dry-run", "--force")
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("would agents/scout.md: replaced, backup at agents/scout.md.bak", r.stdout)
+        self.assertIn("would agents/explorer.md: replaced, backup at agents/explorer.md.bak", r.stdout)
         self.assertEqual(self.snapshot(), before)
 
     def test_uninstall_dry_run_byte_identical(self):
         self.run_install("--workflow-size", "small")
-        (self.agents / "scout.md").write_text("edited", encoding="utf-8")
+        (self.agents / "explorer.md").write_text("edited", encoding="utf-8")
         before = self.snapshot()
         r = self.run_install("--uninstall", "--dry-run", "--force")
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -439,21 +439,21 @@ class InstallTests(unittest.TestCase):
                 self.assertTrue(self.claude_md.read_text(encoding="utf-8").startswith(content + "\n" + BEGIN))
 
     def test_force_symlink_reports_target(self):
-        real = self.dir / "elsewhere" / "scout-real.md"
+        real = self.dir / "elsewhere" / "explorer-real.md"
         real.parent.mkdir()
         real.write_text("foreign", encoding="utf-8")
         self.agents.mkdir()
-        self.link(self.agents / "scout.md", real)
+        self.link(self.agents / "explorer.md", real)
         r = self.run_install("--force")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn(f"symlink target {os.path.realpath(real)} overwritten", r.stdout)
-        self.assertTrue((self.agents / "scout.md").is_symlink())
-        self.assertEqual(real.read_bytes(), self.src("scout"))
-        self.assertEqual((self.agents / "scout.md.bak").read_text(encoding="utf-8"), "foreign")
+        self.assertTrue((self.agents / "explorer.md").is_symlink())
+        self.assertEqual(real.read_bytes(), self.src("explorer"))
+        self.assertEqual((self.agents / "explorer.md.bak").read_text(encoding="utf-8"), "foreign")
         (real).write_text("edited", encoding="utf-8")
         r = self.run_install("--uninstall", "--force")
         self.assertIn(f"symlink target {os.path.realpath(real)}", r.stdout)
-        self.assertFalse((self.agents / "scout.md").is_symlink())
+        self.assertFalse((self.agents / "explorer.md").is_symlink())
         self.assertEqual(real.read_text(encoding="utf-8"), "edited")
 
 
@@ -472,7 +472,7 @@ class ShippedAgentTests(unittest.TestCase):
             self.assertIn("Monitor", tools, name)
 
     def test_command_running_tiers_have_waiting_rule(self):
-        for name in ("fast-worker", "std-worker", "deep-worker", "verifier"):
+        for name in ("std-worker", "deep-worker", "verifier"):
             _, body = self.frontmatter(name)
             self.assertIn("- Waiting:", body, name)
             self.assertIn("never start a second copy", body, name)
