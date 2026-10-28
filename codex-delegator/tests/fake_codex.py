@@ -25,10 +25,26 @@ if args == ["login", "status"]:
 assert args[0] == "exec", args
 if mode == "no_stdin":
     time.sleep(30)
-prompt = sys.stdin.read()
+prompt = sys.stdin.buffer.read().decode("utf-8")
 if os.environ.get("DELEGATOR_TEST_PROMPT_COPY"):
     Path(os.environ["DELEGATOR_TEST_PROMPT_COPY"]).write_text(prompt, encoding="utf-8")
 print(json.dumps({"type": "thread.started", "thread_id": "offline-fixture"}), flush=True)
+task = args[args.index("--sandbox") + 1] == "workspace-write"
+if task:
+    workspace = Path(args[args.index("-C") + 1])
+    assert workspace == Path.cwd()
+    assert (workspace / "a.txt").read_text(encoding="utf-8") == "before\n"
+    (workspace / "a.txt").write_text("implemented\n", encoding="utf-8")
+    (workspace / "new 测试.bin").write_bytes(b"\x00\xffnew\n")
+    print(json.dumps({"type": "item.completed", "item": {"type": "file_change"}}), flush=True)
+    if mode == "task_background":
+        subprocess.Popen([sys.executable, "-c",
+                          "import time; from pathlib import Path; time.sleep(3); "
+                          "Path('a.txt').write_text('late background write\\n', encoding='utf-8')"])
+    if mode == "task_timeout":
+        time.sleep(30)
+if mode == "review_file_change":
+    print(json.dumps({"type": "item.completed", "item": {"type": "file_change"}}), flush=True)
 if mode == "timeout_partial":
     destination = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
     destination.write_text(json.dumps({"complete": False, "summary": "Partial evidence",
@@ -52,6 +68,11 @@ if mode == "source_changed":
     Path(os.environ["DELEGATOR_TEST_SOURCE"]).write_text("changed during review", encoding="utf-8")
 if mode != "missing_final":
     result = {"complete": mode != "partial", "summary": "Offline fixture", "findings": [], "limitations": []}
+    if task:
+        result = {"complete": mode != "partial", "summary": "Implemented fixture",
+                  "changed_files": ["a.txt", "new 测试.bin"],
+                  "tests": [{"command": "fixture-check", "outcome": "passed", "details": "Fixture only"}],
+                  "limitations": []}
     if mode == "many_findings":
         result["findings"] = [{"priority": "P2", "file": "a.txt", "line": i + 1,
                                "title": "Fixture", "body": "Fixture only"} for i in range(12)]

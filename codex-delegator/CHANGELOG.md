@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 — 2026-10-28
+
+- Add explicit `--mode task` for Claude Code to delegate implementation and testing to Codex in a retained detached worktree, starting from `--head` or `HEAD`. Review remains the default; its modes and result contract are preserved.
+- Task mode uses `workspace-write`, enables applicable project instructions, accepts file-change events, and validates a task result with changed files, test outcomes, and limitations.
+- Preserve task worktrees on success and failure. Capture actual tracked diffs and nonignored new files separately from model-reported changes, with hashes and recovery metadata. Evidence collection errors invalidate completion without deleting partial work.
+- Stop the Windows task job or original POSIX process group before final log parsing and evidence capture, including after successful parent exit. Windows starts suspended until job assignment succeeds. Keep review process handling unchanged.
+- Add task selection, source-preservation, binary-file, failure, interruption, artifact recovery, and schema regression tests. Decode fixture stdin as UTF-8 consistently on Windows.
+- Validate offline behavior and a no-model dry run on Windows using Python 3.12 and `codex-cli 0.165.0-alpha.1.2`. The real task smoke run was blocked by host execution policy and correctly reported incomplete. Successful live edits/tests and native macOS/Linux runs remain unverified.
+
 ## 1.1.0 — 2026-10-14
 
 Brings the process hardening and ergonomics of `claude-delegator` 8.x to this skill and adds code-grounded reviews. Collab mode and an executor helper are out of scope; the default model (Codex's built-in choice) and `medium` effort are unchanged.
