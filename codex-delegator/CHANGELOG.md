@@ -33,6 +33,13 @@
 - Clarify unsupported evidence paths and index discrepancies. Keep default review behavior and intentional evidence limits unchanged.
 - Validate 78 offline tests on Windows (76 passed, 2 platform skips), the native no-model task dry run, and a focused final probe-cleanup signal check. Claude's review completed with limited coverage: it read the runner and documentation but did not inspect the actual diff or tests.
 
+### Bounded task connection recovery — 2026-10-29
+
+- Allow one automatic task retry for the recognized `workspace routing discovery failed` startup stream, with `--connection-retries 0` to opt out. Reuse the same objective, model, settings, and worktree after a five-second delay within the original timeout budget.
+- Require confirmed process-tree termination, no observed model/tool work or usage, no final response, and unchanged worktree, index/HEAD, ignored files, and scratch contents. Unknown or malformed diagnostics, partial work, timeout, interruption, and cleanup uncertainty prevent retry. Baseline inventory uncertainty disables recovery while allowing the initial task.
+- Preserve the failed attempt's artifacts before starting another call and record the attempt history and retry count. Claude must keep polling the original invocation; it cannot reset the budget through another launch. Review-mode recovery remains unchanged.
+- Validate 96 offline tests on Windows (94 passed, 2 platform skips), including 18 connection-recovery tests. The recorded routing failure is recognized without relaunching its task. Independent review and focused deadline, archive-failure, and identical-prompt checks passed; live connection recovery remains unverified.
+
 ## 1.1.0 — 2026-10-14
 
 Brings the process hardening and ergonomics of `claude-delegator` 8.x to this skill and adds code-grounded reviews. Collab mode and an executor helper are out of scope; the default model (Codex's built-in choice) and `medium` effort are unchanged.

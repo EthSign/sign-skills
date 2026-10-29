@@ -53,6 +53,32 @@ if mode == "no_stdin":
 prompt = sys.stdin.buffer.read().decode("utf-8")
 if os.environ.get("DELEGATOR_TEST_PROMPT_COPY"):
     Path(os.environ["DELEGATOR_TEST_PROMPT_COPY"]).write_text(prompt, encoding="utf-8")
+if mode.startswith("routing"):
+    workspace = Path(args[args.index("-C") + 1])
+    if mode == "routing_changed":
+        (workspace / "a.txt").write_text("partial work\n", encoding="utf-8")
+    elif mode == "routing_ignored":
+        (workspace / "ignored.tmp").write_text("ignored output\n", encoding="utf-8")
+    elif mode == "routing_scratch":
+        (Path(os.environ["TMPDIR"]) / "partial.txt").write_text("scratch output", encoding="utf-8")
+    elif mode == "routing_index":
+        (workspace / "a.txt").write_text("staged work\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(workspace), "add", "a.txt"], check=True)
+        (workspace / "a.txt").write_text("before\n", encoding="utf-8")
+    elif mode == "routing_final":
+        Path(args[args.index("--output-last-message") + 1]).write_text("{}", encoding="utf-8")
+    lines = (Path(__file__).parent / "routing-failure.jsonl").read_text(encoding="utf-8").splitlines()
+    for line in lines[:-1]:
+        print(line, flush=True)
+    if os.environ.get("DELEGATOR_TEST_ROUTING_EXTRA"):
+        print(os.environ["DELEGATOR_TEST_ROUTING_EXTRA"], flush=True)
+    print(lines[-1], flush=True)
+    if mode == "routing_malformed":
+        print('{"type":', end="", flush=True)
+    if mode == "routing_timeout":
+        time.sleep(30)
+    print("routing fixture stderr", file=sys.stderr, flush=True)
+    sys.exit(1)
 print(json.dumps({"type": "thread.started", "thread_id": "offline-fixture"}), flush=True)
 task = any(value.startswith("default_permissions=") for value in args)
 if task:

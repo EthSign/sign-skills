@@ -12,7 +12,7 @@ Use `scripts/invoke-codex.py` relative to this skill directory. This launches an
 - For implementation, fixes, or executing tests, use explicit `--mode task` and read [task delegation](references/task-mode.md). The user request to delegate that work supplies authorization; do not ask again merely because task mode writes files. Give Codex a bounded objective, permitted scope, acceptance criteria, and relevant validation commands.
 - For review, inspection, or questions without executing project code, use the review workflow below. Omitting `--mode` selects review. Requests for a second opinion do not imply permission to edit.
 
-Task mode creates a retained worktree from a commit, allows edits and relevant tests, and returns changes for Claude to inspect. The following review-only restrictions do not apply to task execution; its controls and recovery rules are in the linked reference.
+Task mode creates a retained worktree from a commit, allows edits and relevant tests, and returns changes for Claude to inspect. It can automatically retry one recognized connection failure before any observed work, subject to the checks in the linked reference. The wrapper owns that retry; Claude must keep polling the same invocation and must not add another retry. The following review-only restrictions do not apply to task execution; its controls and recovery rules are in the linked reference.
 
 ## Review workflow
 
