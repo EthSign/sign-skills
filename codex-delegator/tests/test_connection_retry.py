@@ -23,6 +23,10 @@ TRANSPORT_CAUSES = (
     ("Connection timed out (os error 110)", "connection timed out"),
     ("A connection attempt failed because the connected party did not properly respond after a period of time, "
      "or established connection failed because connected host has failed to respond. (os error 10060)", "connection timed out"),
+    ("failed to lookup address information: Name does not resolve", "dns resolution failed"),
+    ("failed to lookup address information: Try again", "dns resolution failed"),
+    ("failed to lookup address information: No address associated with hostname", "dns resolution failed"),
+    ("Operation timed out (os error 110)", "connection timed out"),
 )
 
 
@@ -209,6 +213,49 @@ class ConnectionRetryTests(unittest.TestCase):
                 self.assertEqual(meta["connection_retry_count"], 0)
                 if name == "changed":
                     self.assertEqual((directory / "worktree/a.txt").read_text(), "partial work\n")
+                    self.assertEqual(runner.connection_failure(directory / "stream.jsonl"), "connection reset")
+                    self.assertIn("No-work verification failed:", meta["connection_retry_disabled_reason"])
+                elif name == "started":
+                    self.assertIn("Event stream is not a recognized connection failure without observed work",
+                                  meta["connection_retry_disabled_reason"])
+                    events = [json.loads(line) for line in (directory / "stream.jsonl").read_text().splitlines()]
+                    control = self.root / "without-started-item.jsonl"
+                    control.write_text("".join(json.dumps(e) + "\n" for e in events if e["type"] != "item.started"))
+                    self.assertEqual(runner.connection_failure(control), "connection reset")
+                else:
+                    self.assertEqual(meta["connection_retries_requested"], 0)
+                    self.assertEqual(runner.connection_failure(directory / "stream.jsonl"), "connection reset")
+
+    def test_cause_erasing_http_fallback_remains_ineligible(self):
+        repo, _ = self.repository()
+        for index, terminal in enumerate(("Connection failed: error sending request", "request timed out")):
+            self.commands.clear()
+            _, meta, directory = self.invoke("routing", ["--mode", "task", "--repo", str(repo)],
+                name="opaque-fallback-" + str(index), env={
+                    "DELEGATOR_TEST_CONNECTION_ERROR": "stream disconnected before completion: No such host is known. (os error 11001)",
+                    "DELEGATOR_TEST_HTTP_FALLBACK_ERROR": terminal})
+            self.assertEqual(len(self.commands), 1)
+            self.assertEqual(meta["connection_retry_count"], 0)
+            self.assertIn("Event stream is not a recognized connection failure without observed work",
+                          meta["connection_retry_disabled_reason"])
+            self.assertIn("Falling back from WebSockets to HTTPS", (directory / "stream.jsonl").read_text())
+
+    def test_reconnect_sequence_is_consistent_until_one_fallback(self):
+        message = "stream disconnected before completion: Connection refused (os error 111)"
+        candidate = self.root / "counter-sequence.jsonl"
+        for next_counter in ("2/5", "1/5", "3/10"):
+            events = transport_events(message)
+            events.insert(3, {"type": "error", "message": f"Reconnecting... {next_counter} ({message})"})
+            candidate.write_text("".join(json.dumps(e) + "\n" for e in events))
+            self.assertIsNone(runner.connection_failure(candidate))
+        events = transport_events(message)
+        events.insert(4, {"type": "error", "message": f"Reconnecting... 1/3 ({message})"})
+        candidate.write_text("".join(json.dumps(e) + "\n" for e in events))
+        self.assertEqual(runner.connection_failure(candidate), "connection refused")
+        events.insert(5, {"type": "item.completed", "item": {"id": "second-fallback", "type": "error", "message":
+                      "Falling back from WebSockets to HTTPS transport. " + message}})
+        candidate.write_text("".join(json.dumps(e) + "\n" for e in events))
+        self.assertIsNone(runner.connection_failure(candidate))
 
     def test_review_mode_never_retries(self):
         _, meta, _ = self.invoke("routing", extra=["--connection-retries", "1"])

@@ -47,12 +47,14 @@
 - Clarify nonterminal recovery metadata, launched-retry counts, inventory bounds, and partial archives. Retain the exact failure classifier and final-message-file guard: the installed CLI's JSONL failure path does not emit an empty final-response file.
 - Validate 98 offline Windows tests (96 passed, 2 platform skips). The two new regressions reproduced their failures before correction and passed afterward; independent remediation review passed. Claude reviewed the retry runner and tests at `f645451`, but did not inspect the patch itself or review the subsequent fixes.
 
-### Broader startup connection recovery — 2026-10-29
+### Broader connection recovery — 2026-10-29
 
-- Recognize verified DNS, refused/reset connection, and socket-timeout errors in native transport envelopes, in addition to workspace-routing discovery. Accept parameterized native reconnect counters while rejecting invalid ranges.
+- Recognize verified DNS, refused/reset connection, and socket-timeout errors in native transport envelopes, in addition to workspace-routing discovery. Accept increasing reconnect counters with consistent limits; allow one reset at transport fallback.
 - Keep the one-retry limit, same prompt/settings, shared deadline, confirmed termination, unchanged file/index/scratch checks, strict event shapes, and refusal after any observed work. Generic cause-erasing HTTP failures, request timeouts, TLS/auth/policy/configuration errors, and unknown messages remain ineligible.
-- Cover English Windows/Winsock and Linux/glibc messages using pinned source mappings and native Windows message-format evidence. Add positive and negative classifier coverage plus offline process tests for each new failure family and the work/opt-out guards.
-- Validate 26 focused offline connection-recovery tests on Windows. No live model/network-fault retry was performed.
+- Cover English Windows/Winsock and Linux glibc/musl messages using pinned source mappings and native Windows message-format evidence. Add positive and negative classifier coverage plus offline process tests for each new failure family and assertions identifying the work/opt-out guard that blocked retry.
+- Document the default CLI's cause-erasing HTTPS fallback: generic terminal failures remain ineligible even after a recognized WebSocket error. Positive process fixtures are explicitly synthetic preserved-cause streams; separate fallback tests reject opaque HTTP failures. Reliable default-path coverage needs richer native diagnostics.
+- Claude reviewed the runner and tests at `de2ebca`, but did not inspect the supplied patch itself or review subsequent fixes. No live model/network-fault retry was performed.
+- Validate the final Windows offline suite: 106 tests, 104 passed and 2 platform skips, including 28 connection-recovery tests. Independent source review of the remediation passed.
 
 ## 1.1.0 — 2026-10-14
 

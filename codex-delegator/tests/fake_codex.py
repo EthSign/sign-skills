@@ -70,14 +70,20 @@ if mode.startswith("routing"):
     lines = (Path(__file__).parent / "routing-failure.jsonl").read_text(encoding="utf-8").splitlines()
     connection_error = os.environ.get("DELEGATOR_TEST_CONNECTION_ERROR")
     if connection_error is not None:
-        rewritten = []
-        for line in lines:
-            event = json.loads(line)
-            details = event.get("item", event.get("error", event))
-            if "message" in details:
-                details["message"] = details["message"].replace("workspace routing discovery failed", connection_error)
-            rewritten.append(json.dumps(event))
-        lines = rewritten
+        # Synthetic preserved-cause terminal stream for wrapper lifecycle tests.
+        # Real 0.165 HTTP fallback can erase that cause; model that separately.
+        events = [json.loads(lines[0]), json.loads(lines[1]), {"type": "turn.started"},
+                  {"type": "error", "message": "Reconnecting... 2/5 (" + connection_error + ")"}]
+        http_error = os.environ.get("DELEGATOR_TEST_HTTP_FALLBACK_ERROR")
+        if http_error is not None:
+            events.extend([
+                {"type": "item.completed", "item": {"id": "fallback", "type": "error", "message":
+                 "Falling back from WebSockets to HTTPS transport. " + connection_error}},
+                {"type": "error", "message": "Reconnecting... 1/5 (" + http_error + ")"}])
+        final_error = http_error if http_error is not None else connection_error
+        events.extend([{"type": "error", "message": final_error},
+                       {"type": "turn.failed", "error": {"message": final_error}}])
+        lines = [json.dumps(event) for event in events]
     for line in lines[:-1]:
         print(line, flush=True)
     if os.environ.get("DELEGATOR_TEST_ROUTING_EXTRA"):

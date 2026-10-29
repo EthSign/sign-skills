@@ -716,6 +716,9 @@ def connection_error_kind(message):
     if cause in (
             "failed to lookup address information: Name or service not known",
             "failed to lookup address information: Temporary failure in name resolution",
+            "failed to lookup address information: No address associated with hostname",
+            "failed to lookup address information: Name does not resolve",
+            "failed to lookup address information: Try again",
             "No such host is known. (os error 11001)",
             "This is usually a temporary error during hostname resolution and means that the local server did not "
             "receive a response from an authoritative server. (os error 11002)"):
@@ -728,6 +731,7 @@ def connection_error_kind(message):
         return "connection reset"
     if cause in (
             "Connection timed out (os error 110)",
+            "Operation timed out (os error 110)",
             "A connection attempt failed because the connected party did not properly respond after a period of time, "
             "or established connection failed because connected host has failed to respond. (os error 10060)"):
         return "connection timed out"
@@ -737,12 +741,13 @@ def connection_error_kind(message):
 
 
 def connection_failure(path):
-    """Require a complete native startup failure stream with no work or usage."""
+    """Require a complete connection-failure stream with no observed work or usage."""
     reason = None
     warning = ("Under-development features enabled: skip_host_skill_discovery. Under-development features "
                "are incomplete and may behave unpredictably. To suppress this warning, set "
                "`suppress_unstable_features_warning = true` in ")
     phase, failed, connection_seen = 0, False, False
+    counter, counter_limit, fell_back = 0, None, False
     item_ids = set()
     try:
         with path.open("rb") as stream:
@@ -774,8 +779,11 @@ def connection_failure(path):
                 if not isinstance(message, str):
                     return None
                 reconnect = re.fullmatch(r"Reconnecting\.\.\. ([1-9][0-9]*)/([1-9][0-9]*) \((.+)\)", message)
-                if reconnect and int(reconnect[1]) > int(reconnect[2]):
-                    return None
+                if reconnect:
+                    current, limit = int(reconnect[1]), int(reconnect[2])
+                    if current > limit or current <= counter or (counter_limit is not None and limit != counter_limit):
+                        return None
+                    counter, counter_limit = current, limit
                 if not connection_error_kind(reconnect[3] if reconnect else message):
                     return None
                 connection_seen = True
@@ -789,6 +797,10 @@ def connection_failure(path):
                 message = item["message"]
                 fallback = "Falling back from WebSockets to HTTPS transport. "
                 if phase == 2 and message.startswith(fallback) and connection_error_kind(message[len(fallback):]):
+                    if fell_back:
+                        return None
+                    fell_back = True
+                    counter, counter_limit = 0, None
                     connection_seen = True
                 elif not (message.startswith(warning) and re.fullmatch(
                         r"[^\r\n]+config\.toml\.", message[len(warning):])):
