@@ -123,6 +123,8 @@ class ConnectionRetryTests(unittest.TestCase):
                                         env={"DELEGATOR_TEST_ROUTING_EXTRA": extra_event})
                 self.assertEqual(len(self.commands), previous + 1)
                 self.assertEqual(meta["connection_retry_count"], 0)
+                self.assertIn("Event stream is not a recognized connection failure without observed work",
+                              meta["connection_retry_disabled_reason"])
 
     def test_worktree_index_ignored_scratch_and_final_output_block_retry(self):
         repo, _ = self.repository()
@@ -205,6 +207,23 @@ class ConnectionRetryTests(unittest.TestCase):
         self.assertEqual((directory / "attempts/attempt-1/stream.jsonl").read_bytes(), b"sentinel")
         self.assertEqual(meta["status"], "artifact_error")
 
+    def test_partial_archive_failure_preserves_original_error(self):
+        original = runner.shutil.copyfileobj
+        def disk_full(source, destination, *args, **kwargs):
+            if Path(source.name).name == "stderr.log":
+                destination.write(b"partial")
+                raise OSError(28, "archive disk full")
+            return original(source, destination, *args, **kwargs)
+        with patch.object(runner.shutil, "copyfileobj", side_effect=disk_full):
+            _, meta, directory = self.task()
+        self.assertEqual(len(self.commands), 1)
+        self.assertEqual(meta["status"], "artifact_error")
+        self.assertIn("archive disk full", meta["attempt_artifact_error"])
+        self.assertNotIn("FileExistsError", meta["attempt_artifact_error"])
+        self.assertEqual((directory / "attempts/attempt-1/stderr.log").read_bytes(), b"partial")
+        self.assertEqual((directory / "stream.jsonl").read_text(), FIXTURE.read_text())
+        self.assertEqual(meta["attempts"][0]["status"], "artifact_error")
+
     def test_delay_is_interruptible_and_retains_first_call(self):
         original = runner.time.sleep
         def interrupt_delay(seconds):
@@ -273,6 +292,21 @@ class ConnectionRetryTests(unittest.TestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(meta["status"], "incomplete")
         self.assertIn("changed during retry delay", meta["connection_retry_disabled_reason"])
+
+    def test_post_delay_inventory_failure_keeps_exception_type(self):
+        original = runner.retry_task_state
+        calls = []
+        def unavailable(worktree, scratch):
+            calls.append(worktree)
+            if len(calls) == 3:
+                raise PermissionError("retry inventory denied")
+            return original(worktree, scratch)
+        with patch.object(runner, "retry_task_state", side_effect=unavailable):
+            _, meta, _ = self.task()
+        self.assertEqual(len(self.commands), 1)
+        self.assertEqual(meta["status"], "incomplete")
+        self.assertIn("No-work verification failed: PermissionError: retry inventory denied",
+                      meta["connection_retry_disabled_reason"])
 
     status = staticmethod(test_runner.RunnerTests.status)
 

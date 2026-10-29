@@ -920,7 +920,7 @@ def run(args):
     archived_attempts = set()
     if task_mode:
         meta.update(connection_retries_requested=args.connection_retries, connection_retry_count=0,
-                    connection_retries_effective=args.connection_retries, attempts=[])
+                    attempts=[])
     try:
         write_json(status_path, meta)
         if args.timeout_seconds <= 0:
@@ -1225,11 +1225,15 @@ def run(args):
                 record = {"number": attempt_number, "status": meta["status"], "exit_code": meta.get("exit_code"),
                           "codex_started": child is not None,
                           "task_process_tree_terminated": meta.get("task_process_tree_terminated"),
-                          "connection_failure": connection_failure(run_dir / "stream.jsonl")}
+                          "connection_failure": None}
                 meta["attempts"].append(record)
                 if (meta["status"] != "incomplete" or child.returncode == 0 or not task_tree_stopped
-                        or not record["connection_failure"] or os.path.lexists(final_path)
+                        or os.path.lexists(final_path)
                         or meta["connection_retry_count"] >= args.connection_retries or retry_baseline is None):
+                    break
+                record["connection_failure"] = connection_failure(run_dir / "stream.jsonl")
+                if not record["connection_failure"]:
+                    meta["connection_retry_disabled_reason"] = "Event stream is not a recognized connection failure without observed work"
                     break
                 try:
                     if retry_task_state(snapshot, task_tmp) != retry_baseline:
@@ -1260,7 +1264,8 @@ def run(args):
                     if retry_task_state(snapshot, task_tmp) != retry_baseline:
                         raise ValueError("Task state changed during retry delay")
                 except Exception as exc:
-                    meta.update(status="incomplete", connection_retry_disabled_reason=str(exc))
+                    meta.update(status="incomplete", connection_retry_disabled_reason=
+                                f"No-work verification failed: {type(exc).__name__}: {exc}")
                     break
                 for key in ("turn_completed", "usage", "thread_ids", "item_counts", "event_errors",
                             "positive_output_usage", "exit_code", "pid"):
@@ -1339,13 +1344,16 @@ def run(args):
                     meta["attempts"].append(record)
                 else:
                     meta["attempts"][-1].update(record)
-                try:
-                    destination = run_dir / "attempts" / ("attempt-" + str(attempt_number))
-                    destination.mkdir(parents=True)
-                    with (destination / "attempt.json").open("x", encoding="utf-8") as target:
-                        target.write(json.dumps(meta["attempts"][-1], indent=2) + "\n")
-                except OSError as exc:
-                    record_failure(meta, "artifact_error", attempt_artifact_error=f"{type(exc).__name__}: {exc}")
+                # A partial archive is already diagnosed and must not be reused.
+                # Repeating mkdir here would hide the original storage error.
+                if not meta.get("attempt_artifact_error"):
+                    try:
+                        destination = run_dir / "attempts" / ("attempt-" + str(attempt_number))
+                        destination.mkdir(parents=True)
+                        with (destination / "attempt.json").open("x", encoding="utf-8") as target:
+                            target.write(json.dumps(meta["attempts"][-1], indent=2) + "\n")
+                    except OSError as exc:
+                        record_failure(meta, "artifact_error", attempt_artifact_error=f"{type(exc).__name__}: {exc}")
             meta["duration_seconds"] = round(time.monotonic() - started, 3)
             publish_terminal(run_dir, meta, result)
     print(json.dumps({key: meta.get(key) for key in (

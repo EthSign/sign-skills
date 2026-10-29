@@ -40,6 +40,13 @@
 - Preserve the failed attempt's artifacts before starting another call and record the attempt history and retry count. Claude must keep polling the original invocation; it cannot reset the budget through another launch. Review-mode recovery remains unchanged.
 - Validate 96 offline tests on Windows (94 passed, 2 platform skips), including 18 connection-recovery tests. The recorded routing failure is recognized without relaunching its task. Independent review and focused deadline, archive-failure, and identical-prompt checks passed; live connection recovery remains unverified.
 
+### Claude review of connection recovery — 2026-10-29
+
+- Preserve the original archive error when copying first-attempt diagnostics fails, instead of replacing it with a later directory-exists error. Keep partial artifacts and withhold retry.
+- Preserve exception type and verification context after the retry delay. Skip the extra connection-classification scan when basic eligibility gates already rule out retry, report strict-classifier rejection, and remove the misleading unused effective-retries field.
+- Clarify nonterminal recovery metadata, launched-retry counts, inventory bounds, and partial archives. Retain the exact failure classifier and final-message-file guard: the installed CLI's JSONL failure path does not emit an empty final-response file.
+- Validate 98 offline Windows tests (96 passed, 2 platform skips). The two new regressions reproduced their failures before correction and passed afterward; independent remediation review passed. Claude reviewed the retry runner and tests at `f645451`, but did not inspect the patch itself or review the subsequent fixes.
+
 ## 1.1.0 — 2026-10-14
 
 Brings the process hardening and ergonomics of `claude-delegator` 8.x to this skill and adds code-grounded reviews. Collab mode and an executor helper are out of scope; the default model (Codex's built-in choice) and `medium` effort are unchanged.

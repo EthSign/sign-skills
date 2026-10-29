@@ -104,7 +104,7 @@ Every accepted run directory receives atomic terminal JSON and durable process l
 | `diff.patch`, `schema.json` | Exact repository patch (diff modes only) and final response contract. |
 | `last-message.json` | Native last model message, retained even if invalid or incomplete. |
 | `result.json` | Validated `review` or `task`, with a separate authoritative wrapper `complete` flag. |
-| `metadata.json` | Final status, mode, usage, thread IDs, item counts, duration, scope hashes, cleanup diagnostics. |
+| `metadata.json` | Published status, mode, usage, thread IDs, item counts, duration, scope hashes, and cleanup diagnostics. Task recovery may publish a nonterminal `retry_wait` record before the final result. |
 
 A completed review requires successful process exit, a completed turn with reported positive output usage, valid final JSON declaring completion, and no reported failure/prohibited item. Require terminal `status.json.status=complete` as well as completion in both result and metadata. Zero findings are meaningful only for a complete review. There is no arbitrary maximum number of findings. Cost is `null`: the wrapper does not fabricate a dollar estimate from tokens. Requested model is not asserted to be the resolved model.
 
