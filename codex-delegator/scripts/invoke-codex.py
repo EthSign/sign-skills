@@ -701,9 +701,44 @@ def read_events(path, task=False):
             "item_counts": tools, "event_errors": errors, "positive_output_usage": valid_usage}
 
 
+def connection_error_kind(message):
+    """Classify native transport displays only when they retain a specific cause."""
+    if message == "workspace routing discovery failed":
+        return message
+    prefix = "stream disconnected before completion: "
+    if not isinstance(message, str) or not message.startswith(prefix):
+        return None
+    cause = message[len(prefix):]
+    # Handshake IO errors are displayed directly; established WebSocket errors
+    # retain tungstenite's IO prefix. Neither form proves zero server processing.
+    if cause.startswith("IO error: "):
+        cause = cause[len("IO error: "):]
+    if cause in (
+            "failed to lookup address information: Name or service not known",
+            "failed to lookup address information: Temporary failure in name resolution",
+            "No such host is known. (os error 11001)",
+            "This is usually a temporary error during hostname resolution and means that the local server did not "
+            "receive a response from an authoritative server. (os error 11002)"):
+        return "dns resolution failed"
+    if (cause == "Connection refused (os error 111)"
+            or cause == "No connection could be made because the target machine actively refused it. (os error 10061)"):
+        return "connection refused"
+    if (cause == "Connection reset by peer (os error 104)"
+            or cause == "An existing connection was forcibly closed by the remote host. (os error 10054)"):
+        return "connection reset"
+    if cause in (
+            "Connection timed out (os error 110)",
+            "A connection attempt failed because the connected party did not properly respond after a period of time, "
+            "or established connection failed because connected host has failed to respond. (os error 10060)"):
+        return "connection timed out"
+    # Generic request timeouts and cause-erasing HTTP displays can also describe
+    # response-body, TLS, or configuration failures; do not guess their cause.
+    return None
+
+
 def connection_failure(path):
-    """Recognize only the observed native routing failure, with no work or usage."""
-    reason = "workspace routing discovery failed"
+    """Require a complete native startup failure stream with no work or usage."""
+    reason = None
     warning = ("Under-development features enabled: skip_host_skill_discovery. Under-development features "
                "are incomplete and may behave unpredictably. To suppress this warning, set "
                "`suppress_unstable_features_warning = true` in ")
@@ -736,8 +771,12 @@ def connection_failure(path):
                 phase = 2
             elif kind == "error" and phase == 2 and set(event) == {"type", "message"}:
                 message = event["message"]
-                if not isinstance(message, str) or not (message == reason or re.fullmatch(
-                        r"Reconnecting\.\.\. [1-5]/5 \(workspace routing discovery failed\)", message)):
+                if not isinstance(message, str):
+                    return None
+                reconnect = re.fullmatch(r"Reconnecting\.\.\. ([1-9][0-9]*)/([1-9][0-9]*) \((.+)\)", message)
+                if reconnect and int(reconnect[1]) > int(reconnect[2]):
+                    return None
+                if not connection_error_kind(reconnect[3] if reconnect else message):
                     return None
                 connection_seen = True
             elif kind == "item.completed" and phase in (1, 2) and set(event) == {"type", "item"}:
@@ -748,13 +787,17 @@ def connection_failure(path):
                     return None
                 item_ids.add(item["id"])
                 message = item["message"]
-                if phase == 2 and message == "Falling back from WebSockets to HTTPS transport. " + reason:
+                fallback = "Falling back from WebSockets to HTTPS transport. "
+                if phase == 2 and message.startswith(fallback) and connection_error_kind(message[len(fallback):]):
                     connection_seen = True
                 elif not (message.startswith(warning) and re.fullmatch(
                         r"[^\r\n]+config\.toml\.", message[len(warning):])):
                     return None
             elif (kind == "turn.failed" and phase == 2 and set(event) == {"type", "error"}
-                  and event["error"] == {"message": reason}):
+                  and isinstance(event["error"], dict) and set(event["error"]) == {"message"}):
+                reason = connection_error_kind(event["error"]["message"])
+                if not reason:
+                    return None
                 failed = True
             else:
                 return None

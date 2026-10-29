@@ -47,6 +47,13 @@
 - Clarify nonterminal recovery metadata, launched-retry counts, inventory bounds, and partial archives. Retain the exact failure classifier and final-message-file guard: the installed CLI's JSONL failure path does not emit an empty final-response file.
 - Validate 98 offline Windows tests (96 passed, 2 platform skips). The two new regressions reproduced their failures before correction and passed afterward; independent remediation review passed. Claude reviewed the retry runner and tests at `f645451`, but did not inspect the patch itself or review the subsequent fixes.
 
+### Broader startup connection recovery — 2026-10-29
+
+- Recognize verified DNS, refused/reset connection, and socket-timeout errors in native transport envelopes, in addition to workspace-routing discovery. Accept parameterized native reconnect counters while rejecting invalid ranges.
+- Keep the one-retry limit, same prompt/settings, shared deadline, confirmed termination, unchanged file/index/scratch checks, strict event shapes, and refusal after any observed work. Generic cause-erasing HTTP failures, request timeouts, TLS/auth/policy/configuration errors, and unknown messages remain ineligible.
+- Cover English Windows/Winsock and Linux/glibc messages using pinned source mappings and native Windows message-format evidence. Add positive and negative classifier coverage plus offline process tests for each new failure family and the work/opt-out guards.
+- Validate 26 focused offline connection-recovery tests on Windows. No live model/network-fault retry was performed.
+
 ## 1.1.0 — 2026-10-14
 
 Brings the process hardening and ergonomics of `claude-delegator` 8.x to this skill and adds code-grounded reviews. Collab mode and an executor helper are out of scope; the default model (Codex's built-in choice) and `medium` effort are unchanged.

@@ -10,6 +10,32 @@ import test_runner
 
 runner = test_runner.runner
 FIXTURE = Path(__file__).with_name("routing-failure.jsonl")
+TRANSPORT_CAUSES = (
+    ("failed to lookup address information: Temporary failure in name resolution", "dns resolution failed"),
+    ("failed to lookup address information: Name or service not known", "dns resolution failed"),
+    ("No such host is known. (os error 11001)", "dns resolution failed"),
+    ("This is usually a temporary error during hostname resolution and means that the local server did not "
+     "receive a response from an authoritative server. (os error 11002)", "dns resolution failed"),
+    ("Connection refused (os error 111)", "connection refused"),
+    ("No connection could be made because the target machine actively refused it. (os error 10061)", "connection refused"),
+    ("Connection reset by peer (os error 104)", "connection reset"),
+    ("An existing connection was forcibly closed by the remote host. (os error 10054)", "connection reset"),
+    ("Connection timed out (os error 110)", "connection timed out"),
+    ("A connection attempt failed because the connected party did not properly respond after a period of time, "
+     "or established connection failed because connected host has failed to respond. (os error 10060)", "connection timed out"),
+)
+
+
+def transport_events(message, counter="2/5"):
+    return [
+        {"type": "thread.started", "thread_id": "offline-transport"},
+        {"type": "turn.started"},
+        {"type": "error", "message": f"Reconnecting... {counter} ({message})"},
+        {"type": "item.completed", "item": {"id": "fallback", "type": "error",
+         "message": "Falling back from WebSockets to HTTPS transport. " + message}},
+        {"type": "error", "message": message},
+        {"type": "turn.failed", "error": {"message": message}},
+    ]
 
 
 class ConnectionRetryTests(unittest.TestCase):
@@ -79,6 +105,110 @@ class ConnectionRetryTests(unittest.TestCase):
         _, meta, _ = self.task(extra=["--connection-retries", "0"])
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(meta["connection_retry_count"], 0)
+
+    def test_native_transport_causes_and_envelopes(self):
+        candidate = self.root / "transport.jsonl"
+        for cause, expected in TRANSPORT_CAUSES:
+            for io_prefix in ("", "IO error: "):
+                for counter in ("2/5", "4/4", "10/10"):
+                    with self.subTest(cause=cause, io_prefix=io_prefix, counter=counter):
+                        message = "stream disconnected before completion: " + io_prefix + cause
+                        candidate.write_text("".join(json.dumps(e) + "\n" for e in transport_events(message, counter)))
+                        self.assertEqual(runner.connection_failure(candidate), expected)
+
+    def test_ambiguous_and_nonconnection_errors_never_qualify(self):
+        messages = (
+            "request timed out", "Connection failed: error sending request",
+            'Connection failed: error sending request for url ("https://example.invalid")',
+            "stream disconnected before completion: error sending request",
+            "stream disconnected before completion: idle timeout waiting for SSE",
+            "stream disconnected before completion: IO error: invalid peer certificate: UnknownIssuer",
+            "stream disconnected before completion: IO error: Permission denied (os error 13)",
+            "stream disconnected before completion: IO error: Connection refused (os error 13)",
+            "stream disconnected before completion: HTTP error 401: Connection reset by peer (os error 104)",
+            "stream disconnected before completion: unexpected status 503 Service Unavailable",
+            "stream disconnected before completion: rate limit exceeded: request timed out",
+            "stream disconnected before completion: invalid model: Connection refused (os error 111)",
+            "stream disconnected before completion: Connection refused (os error 111); authentication failed",
+            "Connection refused (os error 111)",
+        )
+        candidate = self.root / "rejected.jsonl"
+        for message in messages:
+            with self.subTest(message=message):
+                candidate.write_text("".join(json.dumps(e) + "\n" for e in transport_events(message)))
+                self.assertIsNone(runner.connection_failure(candidate))
+
+    def test_transport_errors_after_work_or_unknown_events_never_qualify(self):
+        candidate = self.root / "work-before-failure.jsonl"
+        activities = [
+            {"type": "item.started", "item": {"id": "cmd", "type": "command_execution"}},
+            {"type": "item.updated", "item": {"id": "file", "type": "file_change"}},
+            {"type": "item.completed", "item": {"id": "msg", "type": "agent_message", "text": "partial"}},
+            {"type": "item.completed", "item": {"id": "thought", "type": "reasoning", "text": "thinking"}},
+            {"type": "item.started", "item": {"id": "mcp", "type": "mcp_tool_call"}},
+            {"type": "turn.completed", "usage": {"output_tokens": 0}},
+            {"type": "usage", "usage": {}}, {"type": "future.event"},
+        ]
+        for cause, _ in TRANSPORT_CAUSES:
+            for activity in activities:
+                with self.subTest(cause=cause, activity=activity):
+                    events = transport_events("stream disconnected before completion: " + cause)
+                    events.insert(2, activity)
+                    candidate.write_text("".join(json.dumps(e) + "\n" for e in events))
+                    self.assertIsNone(runner.connection_failure(candidate))
+
+    def test_mixed_errors_and_invalid_counters_do_not_qualify(self):
+        candidate = self.root / "mixed.jsonl"
+        message = "stream disconnected before completion: Connection refused (os error 111)"
+        for index in (2, -1):
+            events = transport_events(message)
+            events[index] = ({"type": "error", "message": "HTTP 401: authentication failed"} if index == 2
+                             else {"type": "turn.failed", "error": {"message": "request timed out"}})
+            candidate.write_text("".join(json.dumps(e) + "\n" for e in events))
+            self.assertIsNone(runner.connection_failure(candidate))
+        for counter in ("6/5", "0/5", "1/0", "-1/5", "1/five"):
+            candidate.write_text("".join(json.dumps(e) + "\n" for e in transport_events(message, counter)))
+            self.assertIsNone(runner.connection_failure(candidate))
+        for value in (None, 1, [], {}):
+            events = transport_events(message)
+            events[-1]["error"]["message"] = value
+            candidate.write_text("".join(json.dumps(e) + "\n" for e in events))
+            self.assertIsNone(runner.connection_failure(candidate))
+
+    def test_transport_families_can_recover_once(self):
+        repo, _ = self.repository()
+        self.succeed_second = True
+        for index in (2, 5, 7, 9):
+            cause, expected = TRANSPORT_CAUSES[index]
+            with self.subTest(expected=expected):
+                self.commands.clear()
+                with patch.object(runner, "CONNECTION_RETRY_DELAY", 0.01):
+                    code, meta, directory = self.invoke("routing", ["--mode", "task", "--repo", str(repo)],
+                        name="transport-" + str(index),
+                        env={"DELEGATOR_TEST_CONNECTION_ERROR": "stream disconnected before completion: " + cause})
+                self.assertEqual(code, 0, meta)
+                self.assertEqual(len(self.commands), 2)
+                self.assertEqual(self.commands[0], self.commands[1])
+                self.assertEqual(meta["connection_retry_count"], 1)
+                self.assertEqual(meta["connection_retry_reason"], expected)
+                self.assertTrue((directory / "attempts/attempt-1/stream.jsonl").is_file())
+
+    def test_transport_failures_retain_work_and_opt_out_guards(self):
+        repo, _ = self.repository()
+        message = "stream disconnected before completion: IO error: Connection reset by peer (os error 104)"
+        for name, mode, extra, activity in (
+                ("changed", "routing_changed", [], ""),
+                ("started", "routing", [], '{"type":"item.started","item":{"type":"command_execution"}}'),
+                ("disabled", "routing", ["--connection-retries", "0"], "")):
+            with self.subTest(name=name):
+                self.commands.clear()
+                code, meta, directory = self.invoke(mode, ["--mode", "task", "--repo", str(repo), *extra], name=name,
+                    env={"DELEGATOR_TEST_CONNECTION_ERROR": message, "DELEGATOR_TEST_ROUTING_EXTRA": activity})
+                self.assertEqual(code, 1)
+                self.assertEqual(len(self.commands), 1)
+                self.assertEqual(meta["connection_retry_count"], 0)
+                if name == "changed":
+                    self.assertEqual((directory / "worktree/a.txt").read_text(), "partial work\n")
 
     def test_review_mode_never_retries(self):
         _, meta, _ = self.invoke("routing", extra=["--connection-retries", "1"])

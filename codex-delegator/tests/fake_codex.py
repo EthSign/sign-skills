@@ -68,6 +68,16 @@ if mode.startswith("routing"):
     elif mode == "routing_final":
         Path(args[args.index("--output-last-message") + 1]).write_text("{}", encoding="utf-8")
     lines = (Path(__file__).parent / "routing-failure.jsonl").read_text(encoding="utf-8").splitlines()
+    connection_error = os.environ.get("DELEGATOR_TEST_CONNECTION_ERROR")
+    if connection_error is not None:
+        rewritten = []
+        for line in lines:
+            event = json.loads(line)
+            details = event.get("item", event.get("error", event))
+            if "message" in details:
+                details["message"] = details["message"].replace("workspace routing discovery failed", connection_error)
+            rewritten.append(json.dumps(event))
+        lines = rewritten
     for line in lines[:-1]:
         print(line, flush=True)
     if os.environ.get("DELEGATOR_TEST_ROUTING_EXTRA"):
