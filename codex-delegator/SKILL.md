@@ -1,13 +1,20 @@
 ---
 name: codex-delegator
-description: Ask the installed Codex CLI for an independent, read-only review from Claude Code. Use when the user asks to ask Codex, get a Codex second opinion, or have Codex review a code diff, a plan, or a document or question against the code at a commit. Not for editing, publishing, or autonomous review loops.
+description: Delegate a bounded implementation or testing task from Claude Code to the installed Codex CLI, or request an independent read-only review of code, plans, documents, or code-grounded questions. Use when the user asks to have Codex implement, fix, test, investigate, or review work. Task execution is explicit; review remains the default.
 ---
 
 # Codex Delegator
 
 Use `scripts/invoke-codex.py` relative to this skill directory. This launches an independent Codex model, not a tool server. Claude remains responsible for scope, verification, and the final answer.
 
-## Workflow
+## Choose the workflow
+
+- For implementation, fixes, or executing tests, use explicit `--mode task` and read [task delegation](references/task-mode.md). The user request to delegate that work supplies authorization; do not ask again merely because task mode writes files. Give Codex a bounded objective, permitted scope, acceptance criteria, and relevant validation commands.
+- For review, inspection, or questions without executing project code, use the review workflow below. Omitting `--mode` selects review. Requests for a second opinion do not imply permission to edit.
+
+Task mode creates a retained worktree from a commit, allows edits and relevant tests, and returns changes for Claude to inspect. It can automatically retry one recognized connection failure before any observed work, subject to the checks in the linked reference. The wrapper owns that retry; Claude must keep polling the same invocation and must not add another retry. The following review-only restrictions do not apply to task execution; its controls and recovery rules are in the linked reference.
+
+## Review workflow
 
 1. Confirm the bounded review target and choose one mode.
    - **Committed:** resolve explicit base/head commits and verify the intended PR head locally. `--base` means the exact endpoint diff, not an implicit merge base.
@@ -22,7 +29,7 @@ Use `scripts/invoke-codex.py` relative to this skill directory. This launches an
 7. Independently reproduce actionable findings. Do not fix, commit, push, post comments, or mark a PR ready merely because Codex suggested it. Those actions require the user's applicable authorization.
 8. Finish with findings plus a short debug footer: status, mode, requested model/effort, exact base/head or code-grounded commit or other scope, diff hash (if any), elapsed time, reported token usage, item counts, cleanup status, and artifact path. In code-grounded mode, the review `summary` carries the direct answer; findings with an empty file and line 0 refer to the supplied document or question. Do not invent a dollar cost or infer actual model identity from the requested alias.
 
-## Commands
+## Review commands
 
 Substitute absolute paths and, when you choose one, a unique run directory. Resolve this skill's path from the loaded skill, not the caller's working directory.
 
@@ -45,7 +52,7 @@ python3 /path/to/codex-delegator/scripts/invoke-codex.py \
 
 PowerShell uses the same arguments on one line: `& 'C:\path\python.exe' 'C:\path\invoke-codex.py' ...`. Use `--dry-run` for local preparation/compatibility checks without contacting the model; a dry run is not a review.
 
-## Boundaries
+## Review boundaries
 
 - The wrapper requests the native read-only sandbox and `approval_policy=never`; shell inspection is allowed inside that sandbox. Do not reject a review merely for using shell. Do not bypass host Claude permissions or fall back to an unsandboxed invocation.
 - User config/rules, project instructions, web search, hooks, plugins, apps, delegation, and host skill discovery are suppressed by CLI controls; execution starts in a fresh directory outside the snapshot. These controls are not a separate container, filesystem read allowlist, or guarantee against every managed configuration layer. See [README.md](README.md) for the trust boundary and compatibility limits.

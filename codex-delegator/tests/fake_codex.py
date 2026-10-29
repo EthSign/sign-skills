@@ -22,13 +22,99 @@ if args == ["--version"]:
     sys.exit(0)
 if args == ["login", "status"]:
     sys.exit(0 if os.environ.get("DELEGATOR_TEST_AUTH", "1") == "1" else 1)
+if args[0] == "app-server":
+    overrides = dict(value.split("=", 1) for i, value in enumerate(args) if i and args[i - 1] == "-c")
+    profile = json.loads(overrides["default_permissions"])
+    defined = any(key.startswith("permissions." + profile + ".") for key in overrides)
+    if mode == "task_permission_malformed":
+        print("invalid startup response")
+        sys.exit(1)
+    if not defined and mode != "task_permission_fallback":
+        detail = f"default_permissions refers to undefined profile `{profile}`"
+        if mode == "task_permission_unrelated_error":
+            detail = "an unrelated configuration error"
+        print(json.dumps({"error": {"data": {"reason": "configLoad", "detail": detail}}}))
+        sys.exit(1)
+    if defined and mode == "task_permission_rejected":
+        print(json.dumps({"error": {"data": {"reason": "configLoad", "detail": "unsupported profile"}}}))
+        sys.exit(1)
+    print(json.dumps({"appServerVersion": "0.0.0-offline", "configRequirements": {}}))
+    sys.exit(0)
+if args[0] == "sandbox":
+    if mode == "task_sandbox_blocked":
+        print("native MXC is unavailable", file=sys.stderr)
+        sys.exit(1)
+    if mode != "task_sandbox_missing_marker":
+        print("SANDBOX_PROBE_OK")
+    sys.exit(0)
 assert args[0] == "exec", args
 if mode == "no_stdin":
     time.sleep(30)
-prompt = sys.stdin.read()
+prompt = sys.stdin.buffer.read().decode("utf-8")
 if os.environ.get("DELEGATOR_TEST_PROMPT_COPY"):
     Path(os.environ["DELEGATOR_TEST_PROMPT_COPY"]).write_text(prompt, encoding="utf-8")
+if mode.startswith("routing"):
+    workspace = Path(args[args.index("-C") + 1])
+    if mode == "routing_changed":
+        (workspace / "a.txt").write_text("partial work\n", encoding="utf-8")
+    elif mode == "routing_ignored":
+        (workspace / "ignored.tmp").write_text("ignored output\n", encoding="utf-8")
+    elif mode == "routing_scratch":
+        (Path(os.environ["TMPDIR"]) / "partial.txt").write_text("scratch output", encoding="utf-8")
+    elif mode == "routing_index":
+        (workspace / "a.txt").write_text("staged work\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(workspace), "add", "a.txt"], check=True)
+        (workspace / "a.txt").write_text("before\n", encoding="utf-8")
+    elif mode == "routing_final":
+        Path(args[args.index("--output-last-message") + 1]).write_text("{}", encoding="utf-8")
+    lines = (Path(__file__).parent / "routing-failure.jsonl").read_text(encoding="utf-8").splitlines()
+    connection_error = os.environ.get("DELEGATOR_TEST_CONNECTION_ERROR")
+    if connection_error is not None:
+        # Synthetic preserved-cause terminal stream for wrapper lifecycle tests.
+        # Real 0.165 HTTP fallback can erase that cause; model that separately.
+        events = [json.loads(lines[0]), json.loads(lines[1]), {"type": "turn.started"},
+                  {"type": "error", "message": "Reconnecting... 2/5 (" + connection_error + ")"}]
+        http_error = os.environ.get("DELEGATOR_TEST_HTTP_FALLBACK_ERROR")
+        if http_error is not None:
+            events.extend([
+                {"type": "item.completed", "item": {"id": "fallback", "type": "error", "message":
+                 "Falling back from WebSockets to HTTPS transport. " + connection_error}},
+                {"type": "error", "message": "Reconnecting... 1/5 (" + http_error + ")"}])
+        final_error = http_error if http_error is not None else connection_error
+        events.extend([{"type": "error", "message": final_error},
+                       {"type": "turn.failed", "error": {"message": final_error}}])
+        lines = [json.dumps(event) for event in events]
+    for line in lines[:-1]:
+        print(line, flush=True)
+    if os.environ.get("DELEGATOR_TEST_ROUTING_EXTRA"):
+        print(os.environ["DELEGATOR_TEST_ROUTING_EXTRA"], flush=True)
+    print(lines[-1], flush=True)
+    if mode == "routing_malformed":
+        print('{"type":', end="", flush=True)
+    if mode == "routing_timeout":
+        time.sleep(30)
+    print("routing fixture stderr", file=sys.stderr, flush=True)
+    sys.exit(1)
 print(json.dumps({"type": "thread.started", "thread_id": "offline-fixture"}), flush=True)
+task = any(value.startswith("default_permissions=") for value in args)
+if task:
+    workspace = Path(args[args.index("-C") + 1])
+    assert workspace == Path.cwd()
+    assert (workspace / "a.txt").read_text(encoding="utf-8") == "before\n"
+    (workspace / "a.txt").write_text("implemented\n", encoding="utf-8")
+    (workspace / "new 测试.bin").write_bytes(b"\x00\xffnew\n")
+    print(json.dumps({"type": "item.completed", "item": {"type": "file_change"}}), flush=True)
+    if mode == "task_background":
+        subprocess.Popen([sys.executable, "-c",
+                          "import time; from pathlib import Path; time.sleep(3); "
+                          "Path('a.txt').write_text('late background write\\n', encoding='utf-8')"])
+    if mode == "task_temp_probe":
+        assert os.environ["TMP"] == os.environ["TEMP"] == os.environ["TMPDIR"]
+        (Path(os.environ["TMPDIR"]) / "probe.txt").write_text("scratch works", encoding="utf-8")
+    if mode == "task_timeout":
+        time.sleep(30)
+if mode == "review_file_change":
+    print(json.dumps({"type": "item.completed", "item": {"type": "file_change"}}), flush=True)
 if mode == "timeout_partial":
     destination = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
     destination.write_text(json.dumps({"complete": False, "summary": "Partial evidence",
@@ -52,6 +138,11 @@ if mode == "source_changed":
     Path(os.environ["DELEGATOR_TEST_SOURCE"]).write_text("changed during review", encoding="utf-8")
 if mode != "missing_final":
     result = {"complete": mode != "partial", "summary": "Offline fixture", "findings": [], "limitations": []}
+    if task:
+        result = {"complete": mode != "partial", "summary": "Implemented fixture",
+                  "changed_files": ["a.txt", "new 测试.bin"],
+                  "tests": [{"command": "fixture-check", "outcome": "passed", "details": "Fixture only"}],
+                  "limitations": []}
     if mode == "many_findings":
         result["findings"] = [{"priority": "P2", "file": "a.txt", "line": i + 1,
                                "title": "Fixture", "body": "Fixture only"} for i in range(12)]
