@@ -204,13 +204,24 @@ starts. The original checkout is never Claude's working directory.
 
 The runner also enforces:
 
-- read-only `Read`, `Glob`, and `Grep` tools for repository reviews;
+- read-only `Read`, `Glob`, and `Grep` tools for repository reviews, confined by
+  Claude Code's `--restricted` mode to the snapshot and the evidence directory
+  that holds the frozen `changes.patch`;
 - no tools or slash commands for bounded analysis;
 - no inherited MCP servers, repository settings, browser, shell, or edit tools;
 - evidence byte and untracked-file limits;
 - per-Git-command and wall-clock timeouts;
 - streamed-result validation and authentication-aware budget handling;
-- trap/finally-based process, worktree, and temporary-directory cleanup.
+- trap/finally-based process, worktree, and temporary-directory cleanup, also on
+  the SIGHUP of a closed terminal;
+- Git commands that ignore inherited `GIT_DIR`, `GIT_WORK_TREE`, and
+  `GIT_INDEX_FILE`.
+
+Repository reviews need a Claude Code CLI that advertises `--restricted` and
+`--add-dir`; an empty `--base-revision` or `--head-revision` is refused rather
+than treated as a prompt-only analysis. `out_of_snapshot_paths` and
+`native_inspection_observed` in the metadata are diagnostics: the CLI enforces
+the confinement, and not every CLI version streams the reviewer's tool calls.
 
 The Advisory runner never asks Claude to edit code, post comments, or perform
 external actions. Collab conversation turns use the same no-tools isolation;

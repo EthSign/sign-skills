@@ -18,6 +18,8 @@ spec = importlib.util.spec_from_file_location("claude_runner", ROOT / "scripts" 
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 REAL_POPEN = subprocess.Popen
+PROVIDER_VARIABLES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                      "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
 
 class RunnerTests(unittest.TestCase):
@@ -25,6 +27,7 @@ class RunnerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="claude-python-tests-")
         self.root = Path(self.temp.name).resolve()
         self.children, self.commands = [], []
+        self.native_flags = runner.NATIVE_REQUIRED_FLAGS
         self.auth = {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "pro",
                      "email": "do-not-persist@example.invalid"}
 
@@ -36,7 +39,7 @@ class RunnerTests(unittest.TestCase):
 
     def preflight(self, command):
         if command[1:] == ["--help"]:
-            return " ".join(runner.REQUIRED_FLAGS)
+            return " ".join(runner.REQUIRED_FLAGS + self.native_flags)
         if command[1:] == ["--version"]:
             return "2.1.263 (offline fixture)"
         if command[1:] == ["auth", "status", "--json"]:
@@ -61,6 +64,9 @@ class RunnerTests(unittest.TestCase):
              patch.object(runner.subprocess, "Popen", side_effect=self.popen), \
              patch.dict(os.environ, {"CLAUDE_PY_TEST_MODE": mode}), \
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            # The developer's own provider overrides must not change the budget arguments under test.
+            for key in PROVIDER_VARIABLES:
+                os.environ.pop(key, None)
             code = runner.run(args)
         meta = json.loads((directory / "metadata.json").read_text())
         result = json.loads((directory / "result.json").read_text())
@@ -104,7 +110,7 @@ class RunnerTests(unittest.TestCase):
     def test_collab_uses_neutral_prompt_and_existing_safety(self):
         code, meta, result, out = self.invoke("collab_success", ["--collab"])
         self.assertEqual(code, 0, meta)
-        self.assertEqual(meta["wrapper_version"], "8.1.1")
+        self.assertEqual(meta["wrapper_version"], "8.1.2")
         self.assertEqual(meta["model"], "claude-opus-5-5")
         self.assertEqual(meta["effort"], "high")
         self.assertEqual(meta["review_scope"], "bounded-collab")
@@ -231,6 +237,107 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--disallowedTools") + 1], ",".join(runner.DENIED_TOOLS))
         self.assertFalse(Path(meta["snapshot_root"]).exists())
         self.assertEqual(self.git(repo, "worktree", "list", "--porcelain").count(b"worktree "), 1)
+
+    def test_native_review_is_confined_and_pointed_at_the_frozen_patch(self):
+        repo, _ = self.repository()
+        (repo / "a.txt").write_bytes(b"changed")
+        outside = self.root / "outside-secret.txt"
+        outside.write_text("not part of the review")
+        with patch.dict(os.environ, {"CLAUDE_PY_TEST_OUTSIDE": str(outside)}):
+            code, meta, result, _ = self.invoke("inspect_evidence", ["--working-directory", str(repo), "--review-working-tree"])
+        self.assertEqual(code, 0, meta)
+        cmd = self.commands[0]
+        self.assertIn("--restricted", cmd)
+        self.assertEqual(cmd[cmd.index("--add-dir") + 1], meta["evidence_root"])
+        # --add-dir accepts several values, so an option must follow its single directory.
+        self.assertTrue(cmd[cmd.index("--add-dir") + 2].startswith("--"))
+        self.assertEqual(meta["file_tool_confinement"], "claude-restricted-snapshot-and-evidence")
+        self.assertTrue(meta["native_inspection_observed"])
+        self.assertEqual(meta["out_of_snapshot_paths"], sorted([str(outside), "~/.ssh"], key=str.casefold))
+        self.assertIn("evidence/changes.patch", meta["inspected_paths"])
+        self.assertIn("repository/a.txt", meta["inspected_paths"])
+        self.assertTrue(result["review_complete"])
+
+    def test_native_review_requires_a_cli_with_restricted_mode(self):
+        repo, _ = self.repository()
+        (repo / "a.txt").write_bytes(b"changed")
+        for index, advertised in enumerate((("--add-dir",), ("--restricted",))):
+            with self.subTest(advertised=advertised):
+                self.native_flags = advertised
+                code, meta, _, _ = self.invoke(extra=["--working-directory", str(repo), "--review-working-tree"], name=f"old-cli-{index}")
+                self.assertEqual(code, 1)
+                self.assertEqual(meta["status"], "preflight_error")
+                self.assertFalse(meta["claude_start_attempted"])
+        self.assertFalse(self.commands)
+        # Prompt-only analysis exposes no file tools and must keep working on such a CLI.
+        self.native_flags = ()
+        self.assertEqual(self.invoke(name="bounded-old-cli")[0], 0)
+
+    def test_empty_revisions_never_downgrade_to_prompt_only_analysis(self):
+        repo, _ = self.repository()
+        (repo / "a.txt").write_bytes(b"changed")
+        cases = (("--base-revision", "", "--head-revision", ""), ("--base-revision", " ", "--head-revision", "HEAD"),
+                 ("--base-revision", "HEAD", "--head-revision", ""), ("--head-revision", "HEAD"))
+        for index, switches in enumerate(cases):
+            with self.subTest(switches=switches):
+                code, meta, result, _ = self.invoke(extra=["--working-directory", str(repo), *switches], name=f"empty-revision-{index}")
+                self.assertEqual(code, 1)
+                self.assertEqual(meta["status"], "preflight_error")
+                self.assertTrue(meta["native_code_review"])
+                self.assertFalse(result["review_complete"])
+        self.assertFalse(self.commands)
+
+    def test_inherited_git_location_variables_do_not_redirect_the_snapshot(self):
+        repo, head = self.repository()
+        other, other_head = self.repository("other")
+        (other / "b.txt").write_bytes(b"other\n")
+        self.git(other, "add", ".")
+        self.git(other, "commit", "-m", "other")
+        other_head = self.git(other, "rev-parse", "HEAD").decode().strip()
+        (repo / "a.txt").write_bytes(b"changed")
+        before = self.git(other, "status", "--porcelain")
+        hostile = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other), "GIT_INDEX_FILE": str(other / ".git" / "index")}
+        with patch.dict(os.environ, hostile):
+            code, meta, _, _ = self.invoke(extra=["--working-directory", str(repo), "--review-working-tree"])
+        self.assertEqual(code, 0, meta)
+        self.assertEqual(meta["repository_root"], str(repo))
+        self.assertEqual(meta["repository_head"], head)
+        self.assertNotEqual(meta["repository_head"], other_head)
+        self.assertEqual(before, self.git(other, "status", "--porcelain"))
+        self.assertEqual(self.git(other, "worktree", "list", "--porcelain").count(b"worktree "), 1)
+
+    @unittest.skipUnless(hasattr(__import__("signal"), "SIGHUP"), "POSIX hangup delivery")
+    def test_hangup_publishes_interrupted_and_stops_the_child(self):
+        import signal
+        fake = self.root / "fake-cli"
+        flags = " ".join(runner.REQUIRED_FLAGS)
+        fake.write_text(f"#!{sys.executable}\nimport json, sys, time\n"
+                        f"if '--help' in sys.argv: print({flags!r}); sys.exit(0)\n"
+                        "if '--version' in sys.argv: print('2.1.263 (offline fixture)'); sys.exit(0)\n"
+                        "if sys.argv[1:3] == ['auth', 'status']:\n"
+                        "    print(json.dumps(dict(loggedIn=True, authMethod='claude.ai', apiProvider='firstParty', subscriptionType='pro'))); sys.exit(0)\n"
+                        "print(json.dumps({'type': 'system'}), flush=True)\ntime.sleep(60)\n")
+        fake.chmod(0o755)
+        directory = self.root / "hangup"
+        wrapper = REAL_POPEN([sys.executable, str(ROOT / "scripts" / "invoke-claude.py"), "--prompt", "Review the bounded test objective",
+                              "--working-directory", str(self.root), "--run-directory", str(directory), "--claude-path", str(fake)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.children.append(wrapper)
+        status, deadline = {}, time.monotonic() + 30
+        while time.monotonic() < deadline and status.get("status") != "running":
+            try:
+                status = json.loads((directory / "status.json").read_text())
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.05)
+        self.assertEqual(status.get("status"), "running")
+        wrapper.send_signal(signal.SIGHUP)
+        self.assertEqual(wrapper.wait(timeout=30), 1)
+        final = json.loads((directory / "status.json").read_text())
+        self.assertEqual(final["status"], "interrupted")
+        self.assertTrue(final["terminal"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(status["process_id"], 0)
 
     def test_native_unexpected_tool_is_diagnostic(self):
         repo, _ = self.repository()
@@ -397,8 +504,8 @@ class RunnerTests(unittest.TestCase):
         import signal
         original = runner.publish
         def guarded_publish(*args):
-            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
-            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+            for number in runner.TERMINATION_SIGNALS:
+                self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
             return original(*args)
         with patch.object(runner, "publish", side_effect=guarded_publish):
             code, _, _, _ = self.invoke()

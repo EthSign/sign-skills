@@ -9,7 +9,7 @@ import shutil
 import stat
 import tempfile
 
-from claude_process import resolve_on_path, run_capture
+from claude_process import git_environment, resolve_on_path, run_capture
 
 
 def sha256(data):
@@ -48,7 +48,7 @@ class Snapshot:
             self.git_executable = resolve_on_path("git")
         result = run_capture([self.git_executable, "--literal-pathspecs", "-c", f"core.hooksPath={os.devnull}",
                                  "-c", "core.fsmonitor=false", "-C", str(root), *args],
-                                timeout=self.args.git_command_timeout_seconds)
+                                timeout=self.args.git_command_timeout_seconds, env=git_environment())
         if result.returncode:
             raise RuntimeError("Git failed: " + result.stderr.decode("utf-8", "replace")[:2000])
         return result.stdout

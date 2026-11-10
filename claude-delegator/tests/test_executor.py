@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import importlib.util
 from unittest.mock import patch
@@ -160,11 +161,50 @@ class ExecutorTests(unittest.TestCase):
         self.assertFalse((self.root / "run").exists())
 
     def test_unsafe_paths_stopped(self):
-        for value in ("../outside", "/absolute", ".git/config", "folder/../file", "folder\\file"):
+        # Case, trailing dots/spaces, ignorable code points and 8.3 names all reach the same
+        # directory on macOS or Windows filesystems.
+        for value in ("../outside", "/absolute", ".git/config", "folder/../file", "folder\\file",
+                      ".GIT/config", ".Git/hooks/pre-commit", "nested/.gIt/config", ".claude/settings.json",
+                      ".CLAUDE/settings.json", ".git./config", ".git /config", ".g\u200cit/config",
+                      "GIT~1/config", "claude~1/settings.json"):
             with self.subTest(value=value):
+                # Checked directly as well: end to end, the changed plan hash alone would stop the run.
+                for label in ("write_paths", "read_paths"):
+                    with self.assertRaisesRegex(ValueError, "Unsafe|Invalid"):
+                        executor.relative_paths([value], label)
                 self.agreement["write_paths"] = [value]
                 self.assertNotEqual(self.invoke().returncode, 0)
                 self.assertFalse((self.root / "run").exists())
+
+    def test_lookalike_names_remain_usable(self):
+        for value in (".gitignore", ".github/workflows/ci.yml", "git/config", ".claude-notes.md", "docs/.gitkeep"):
+            with self.subTest(value=value):
+                self.assertEqual(executor.relative_paths([value], "write_paths"), [value])
+
+    @unittest.skipUnless(hasattr(__import__("signal"), "SIGHUP"), "POSIX hangup delivery")
+    def test_hangup_is_reported_as_interrupted(self):
+        import signal, threading
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)  # A missing handler must not kill the test runner.
+        self.addCleanup(signal.signal, signal.SIGHUP, previous)
+        def hang_up():
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    if json.loads((self.root / "run/status.json").read_text())["status"] == "running":
+                        break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGHUP)
+        sender = threading.Thread(target=hang_up)
+        sender.start()
+        result = self.invoke("timeout", extra=["--max-runtime-minutes", "1"])
+        sender.join()
+        self.assertEqual(result.returncode, 1)
+        status = json.loads((self.root / "run/status.json").read_text())
+        self.assertEqual(status["status"], "interrupted")
+        self.assertTrue(status["terminal"])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
 
     def test_symlink_source_stops(self):
         (self.source / "editable.txt").unlink()

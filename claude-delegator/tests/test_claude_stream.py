@@ -166,6 +166,33 @@ class ParseStreamTests(unittest.TestCase):
         self.assertEqual(metadata["inspected_paths"], ["repository/src/example.py"])
         self.assertEqual(metadata["model_usage_cost_usd"], None)
 
+    def test_native_paths_outside_the_snapshot_are_reported(self) -> None:
+        root = Path(self.temporary.name).resolve()
+        snapshot, evidence, elsewhere = root / "snapshot", root / "evidence", root / "elsewhere"
+        for directory in (snapshot / "src", evidence, elsewhere):
+            directory.mkdir(parents=True)
+        (elsewhere / "secret.txt").write_text("outside")
+        (snapshot / "link.txt").symlink_to(elsewhere / "secret.txt")
+        paths = [str(snapshot / "src" / "example.py"), "src/relative.py", str(evidence / "changes.patch"),
+                 str(elsewhere / "secret.txt"), "../elsewhere/secret.txt", "link.txt", "~/.ssh/id_rsa"]
+        tools = [{"type": "tool_use", "name": "Read", "input": {"file_path": value}} for value in paths]
+        self.write(assistant("No actionable findings", *tools), terminal("No actionable findings"))
+
+        metadata = self.parse(native=True, snapshot=snapshot, evidence=evidence)["metadata"]
+
+        self.assertEqual(metadata["status"], "success_native_review")
+        self.assertTrue(metadata["native_inspection_observed"])
+        self.assertEqual(metadata["out_of_snapshot_paths"], sorted(paths[3:], key=str.casefold))
+
+    def test_native_review_without_streamed_inspection_is_flagged_not_failed(self) -> None:
+        self.write(assistant("I could not obtain the diff."), terminal("I could not obtain the diff."))
+
+        parsed = self.parse(native=True, snapshot=Path(self.temporary.name) / "snapshot")
+
+        self.assertTrue(parsed["complete"])
+        self.assertFalse(parsed["metadata"]["native_inspection_observed"])
+        self.assertEqual(parsed["metadata"]["out_of_snapshot_paths"], [])
+
     def test_native_tool_allowlist_and_counts_are_case_insensitive(self) -> None:
         review = "No actionable findings"
         self.write(

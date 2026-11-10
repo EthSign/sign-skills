@@ -38,13 +38,26 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(result.stdout, b"raw\x00bytes")
 
     def test_repeated_signals_are_ignored_during_cleanup_then_restored(self):
-        before = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+        self.assertIn(signal.SIGTERM, claude_process.TERMINATION_SIGNALS)
+        if hasattr(signal, "SIGHUP"):
+            self.assertIn(signal.SIGHUP, claude_process.TERMINATION_SIGNALS)
+        before = {number: signal.getsignal(number) for number in claude_process.TERMINATION_SIGNALS}
         with claude_process.cleanup_signals():
             for number in before:
                 self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
                 signal.raise_signal(number)
         for number, previous in before.items():
             self.assertEqual(signal.getsignal(number), previous)
+
+    def test_git_environment_drops_inherited_repository_locations(self):
+        inherited = {name: "/elsewhere" for name in claude_process.GIT_LOCATION_VARIABLES}
+        with patch.dict(os.environ, dict(inherited, GIT_AUTHOR_NAME="kept")):
+            environment = claude_process.git_environment()
+        self.assertFalse(set(inherited) & set(environment))
+        self.assertEqual(environment["GIT_AUTHOR_NAME"], "kept")
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertIn("GIT_DIR", inherited)
+        self.assertIn("GIT_INDEX_FILE", inherited)
 
     def test_resolver_ignores_implicit_cwd_and_relative_path_entries(self):
         original = Path.cwd()

@@ -2,6 +2,59 @@
 
 All notable changes to Claude Delegator are documented here.
 
+## 8.1.2 - 2026-11-10
+
+Fixes from a review of 8.1.1.
+
+### Fixed
+
+- Repository reviews now pass `--restricted` and `--add-dir <evidence>`, so
+  `Read`, `Glob`, and `Grep` are confined to the snapshot and evidence
+  directories. The bare tool allow rule was not path-scoped, which let a
+  prompt-injected diff ask the reviewer to read files elsewhere on the host.
+  A CLI that does not advertise both flags stops in preflight.
+- The review guidance names the frozen `changes.patch` and `manifest.json`.
+  The reviewer has no shell, and earlier real runs reported that they could not
+  run `git diff` and reviewed whole files instead. This is a pointer, not a
+  guarantee: in the low-effort validation run below the bundled recipe still
+  searched the snapshot instead of reading the patch.
+- Empty or whitespace `--base-revision`/`--head-revision` values are refused.
+  Two empty values previously selected the tool-less prompt-only route and could
+  return a clean result for what the caller meant as a repository review.
+- The executor's `.git`/`.claude` path refusal matches the way macOS and Windows
+  resolve names: any letter case, trailing dots or spaces, ignorable Unicode
+  code points, and 8.3 short names.
+- SIGHUP is handled like SIGTERM in the review runner and the executor. A closed
+  terminal previously killed the wrapper while Claude kept running with no
+  timeout and a registered worktree.
+- Snapshot Git commands no longer inherit `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, or the related object and namespace variables.
+- Runner tests clear provider-override variables, so a developer's
+  `ANTHROPIC_BASE_URL` no longer fails two of them.
+
+### Added
+
+- Diagnostic metadata `file_tool_confinement`, `out_of_snapshot_paths`, and
+  `native_inspection_observed`. They do not change the completion status:
+  Claude Code enforces the confinement, and some CLI versions do not stream the
+  bundled reviewer's tool calls. Relative tool paths are now reported relative
+  to the snapshot.
+
+### Validation
+
+- 90 offline tests (89 run on macOS; one is Windows-only) pass on macOS with
+  Python 3.11 and 3.9. A no-model native `--dry-run` passed against Claude Code
+  2.1.322.
+- One real commit-range review ran through the wrapper on macOS with Claude
+  Code 2.1.322 (`claude-opus-5-5`, `low` effort): `success_native_review`, the
+  seeded bug was reported, both observed reads were inside the snapshot, and
+  the snapshot was removed. It did not read `changes.patch`.
+- A direct CLI probe with the wrapper's flags and a small model confirmed the
+  confinement: with `--restricted --add-dir`, reads inside the working
+  directory and the added directory succeeded and a read of a canary file
+  outside both was denied; with the 8.1.1 flags the same canary read succeeded.
+- Not exercised: `high` effort, working-tree mode in a real run, Windows, Linux.
+
 ## 8.1.1 - 2026-09-30
 
 ### Changed

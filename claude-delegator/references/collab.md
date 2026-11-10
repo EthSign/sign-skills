@@ -59,7 +59,7 @@ Codex implements the agreed plan with the normal task tools and runs its agreed 
 
 Use `scripts/invoke-claude-executor.py`, a separate Python 3.10+ standard-library helper on the same platforms as the review runner. Resolve its absolute path relative to this skill and use an available Python runtime. This helper deliberately differs from the read-only review runner. It requires a CLI whose local help includes `--restricted` and `--safe-mode`; if those controls are unavailable, report the blocker and jointly select a supported executor. Do not weaken permissions or install dependencies outside the task scope.
 
-Prepare `agreement.json` with this structure. Paths are exact files relative to the source directory, use forward slashes, and may not traverse symlinks or Git/Claude settings. New output files may appear in `write_paths`; existing context files belong in `read_paths`. Keep those lists disjoint. Include only the files necessary for this task; the helper does not copy an entire repository or infer dependencies.
+Prepare `agreement.json` with this structure. Paths are exact files relative to the source directory, use forward slashes, and may not traverse symlinks or Git/Claude settings. `.git` and `.claude` components are refused in any letter case, with trailing dots or spaces, with ignorable Unicode code points, and as 8.3 short names, because macOS and Windows resolve all of those to the same directory. New output files may appear in `write_paths`; existing context files belong in `read_paths`. Keep those lists disjoint. Include only the files necessary for this task; the helper does not copy an entire repository or infer dependencies.
 
 ```json
 {
