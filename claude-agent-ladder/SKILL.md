@@ -1,13 +1,13 @@
 ---
 name: claude-agent-ladder
-description: Install, update, verify, or remove the Claude agent ladder, a set of tiered Claude Code subagents (scout, explorer, planner, fast-worker, std-worker, deep-worker, verifier) that route each delegated task to the cheapest model and effort that can do it, plus the routing rules that go with them in the user's global CLAUDE.md. Use when the user asks to set up, update, check, or uninstall the Claude agent ladder or tiered subagents. Claude Code only.
+description: Install, update, verify, or remove the Claude agent ladder, a set of tiered Claude Code subagents (explorer, std-worker, deep-worker, verifier) that route each delegated task to the cheapest model and effort that can do it, plus the routing rules that go with them in the user's global CLAUDE.md. Use when the user asks to set up, update, check, or uninstall the Claude agent ladder or tiered subagents. Claude Code only.
 ---
 
 # Claude Agent Ladder
 
 The agent ladder has two parts, and the installer manages both:
 
-- Seven subagent definitions in `subagents/`, installed to `<claude-dir>/agents/`. Each pins a model alias and an effort level.
+- Four subagent definitions in `subagents/`, installed to `<claude-dir>/agents/`. Each pins a model alias and an effort level.
 - The routing rules in `rules.md`, installed into `<claude-dir>/CLAUDE.md` between `<!-- claude-agent-ladder:begin -->` and `<!-- claude-agent-ladder:end -->`. They tell the orchestrating session which tier to pick, when to escalate, and which tiers may spawn which.
 
 `<claude-dir>` is `$CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`.
@@ -35,7 +35,7 @@ The installer is idempotent. Rerunning it after pulling a newer version of this 
 Spawning each tier and asking for its model confirms the definitions load. This makes a few small, billed model calls, so run it only when the user asks for verification:
 
 ```bash
-claude -p "Use the Agent tool to spawn these subagent types concurrently in one message: scout, explorer, planner, fast-worker, std-worker, deep-worker, verifier. Give each the prompt: 'Do not call tools. Reply with exactly one line: MODEL=<the model your system prompt says you are powered by>'. Report each reply as '<type>: <reply>', one per line." --max-turns 4
+claude -p "Use the Agent tool to spawn these subagent types concurrently in one message: explorer, std-worker, deep-worker, verifier. Give each the prompt: 'Do not call tools. Reply with exactly one line: MODEL=<the model your system prompt says you are powered by>'. Report each reply as '<type>: <reply>', one per line." --max-turns 4
 ```
 
 Compare the result with the model table in `README.md`. A tier reporting an older model means the installed Claude Code maps that alias to an older release; updating Claude Code fixes it.
