@@ -29,7 +29,9 @@ class RunnerTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.prompt = self.root / "objective.txt"
         self.prompt.write_text("Review this small plan.", encoding="utf-8")
-        self.children, self.commands, self.stdin = [], [], []
+        self.children, self.commands, self.stdin, self.environments = [], [], [], []
+        self.permission_preflights = []
+        self.execution_preflights = []
         self.authenticated = True
         self.interrupt = False
         self.stderr = ""
@@ -42,11 +44,16 @@ class RunnerTests(unittest.TestCase):
 
     def fake_popen(self, command, **kwargs):
         # The resolved "codex" is sys.executable; route preflight and exec calls to the offline fixture.
-        if command[0] == sys.executable and command[1] in ("exec", "--version", "login"):
+        if command[0] == sys.executable and command[1] in ("exec", "--version", "login", "app-server", "sandbox"):
+            if command[1] == "app-server":
+                self.permission_preflights.append((command, kwargs.get("cwd"), kwargs.get("env")))
+            if command[1] == "sandbox":
+                self.execution_preflights.append((command, kwargs.get("cwd"), kwargs.get("env")))
             child = REAL_POPEN([sys.executable, str(FAKE), *command[1:]], **kwargs)
             if command[1] == "exec" and command[2] != "--help":
                 self.commands.append(command)
                 self.stdin.append(kwargs.get("stdin"))
+                self.environments.append(kwargs.get("env"))
                 self.children.append(child)
                 if self.interrupt:
                     self.interrupt_first_wait(child)
@@ -651,6 +658,449 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(meta["status"], "no_changes")
         self.assertFalse(meta["codex_start_attempted"])
         self.assertEqual(self.children, [])
+
+    def test_task_edits_retained_worktree_and_preserves_source(self):
+        repo, head = self.repository()
+        (repo / "a.txt").write_text("unrelated dirty source\n", encoding="utf-8")
+        (repo / "private.txt").write_text("untracked source", encoding="utf-8")
+        before = runner.capture_working(repo)[3]
+        code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo), "--head", head])
+        self.assertEqual(code, 0, meta)
+        self.assertEqual(meta["mode"], "task")
+        self.assertTrue(meta["complete"])
+        self.assertTrue(meta["worktree_retained"])
+        workspace = Path(meta["task_worktree"])
+        self.assertEqual((workspace / "a.txt").read_text(), "implemented\n")
+        self.assertEqual((workspace / "new 测试.bin").read_bytes(), b"\x00\xffnew\n")
+        self.assertFalse((workspace / "private.txt").exists())
+        self.assertEqual(before, runner.capture_working(repo)[3])
+        self.assertEqual(runner.revision(workspace, "HEAD"), head)
+        self.assertIn(b"+implemented", (directory / "task-diff.patch").read_bytes())
+        self.assertEqual((directory / "task-untracked" / "new 测试.bin").read_bytes(), b"\x00\xffnew\n")
+        self.assertTrue((directory / "task-evidence.json").is_file())
+        result = json.loads((directory / "result.json").read_text(encoding="utf-8"))
+        self.assertTrue(result["task"]["complete"])
+        self.assertNotIn("review", result)
+        command = self.commands[0]
+        self.assertEqual(command[command.index("-C") + 1], str(workspace))
+        self.assertNotIn("--sandbox", command)
+        self.assertTrue(meta["task_permission_verified"])
+        self.assertNotIn("project_doc_max_bytes=0", command)
+        self.assertIn('approval_policy="never"', command)
+        self.assertIn("features.multi_agent=false", command)
+        self.assertEqual(meta["event_errors"], [])
+
+    def test_task_requires_repo_objective_and_commit_start(self):
+        repo, head = self.repository()
+        cases = [(["--mode", "task"], True),
+                 (["--mode", "task", "--repo", str(repo)], False),
+                 (["--mode", "task", "--repo", str(repo), "--base", head], True),
+                 (["--mode", "task", "--repo", str(repo), "--working-tree"], True)]
+        for i, (extra, prompt) in enumerate(cases):
+            with self.subTest(extra=extra):
+                code, meta, _ = self.invoke(extra=extra, prompt=prompt, name=f"invalid-task-{i}")
+                self.assertEqual(code, 1, meta)
+                self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(self.children, [])
+
+    def test_task_background_writer_stops_before_evidence_publication(self):
+        repo, _ = self.repository()
+        code, meta, directory = self.invoke("task_background", ["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 0, meta)
+        evidence = (directory / "task-diff.patch").read_bytes()
+        self.assertIn(b"+implemented", evidence)
+        time.sleep(4)
+        self.assertEqual((Path(meta["task_worktree"]) / "a.txt").read_text(), "implemented\n")
+        self.assertEqual((directory / "task-diff.patch").read_bytes(), evidence)
+
+    def test_task_failures_preserve_edits_and_never_report_complete(self):
+        repo, _ = self.repository()
+        for mode in ("task_timeout", "partial", "malformed", "unexpected", "missing_final", "nonzero"):
+            with self.subTest(mode=mode):
+                code, meta, directory = self.invoke(mode, ["--mode", "task", "--repo", str(repo),
+                                                          "--timeout-seconds", "2"], name=mode)
+                self.assertEqual(code, 1, meta)
+                self.assertFalse(meta["complete"])
+                self.assertTrue(meta["worktree_retained"])
+                self.assertEqual((Path(meta["task_worktree"]) / "a.txt").read_text(), "implemented\n")
+                self.assertTrue((directory / "task-diff.patch").exists())
+                if mode == "task_timeout":
+                    self.assertEqual(meta["status"], "timeout")
+        self.assertEqual(len(self.children), 6)
+
+    def test_task_interrupt_retains_workspace(self):
+        repo, _ = self.repository()
+        self.interrupt = True
+        code, meta, directory = self.invoke("timeout", ["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertEqual(meta["status"], "interrupted")
+        self.assertTrue(meta["worktree_retained"])
+        self.assertTrue(Path(meta["task_worktree"]).is_dir())
+        self.assertTrue((directory / "task-evidence.json").exists())
+
+    def test_task_dry_run_keeps_workspace_without_model_call(self):
+        repo, head = self.repository()
+        code, meta, _ = self.invoke(extra=["--mode", "task", "--repo", str(repo), "--dry-run"])
+        self.assertEqual(code, 0, meta)
+        self.assertEqual(meta["status"], "dry_run")
+        self.assertFalse(meta["complete"])
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(self.children, [])
+        self.assertEqual(runner.revision(Path(meta["task_worktree"]), "HEAD"), head)
+
+    @unittest.skipUnless(os.name == "nt", "Windows suspended task launch")
+    def test_task_job_assignment_failure_never_executes_task(self):
+        repo, _ = self.repository()
+        original_resume = runner.WindowsTaskJob.assign_and_resume
+        def fail_model(job, child):
+            if child in self.children:
+                raise OSError("fixture job denied")
+            return original_resume(job, child)
+        with patch.object(runner.WindowsTaskJob, "assign_and_resume", fail_model):
+            code, meta, _ = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["complete"])
+        self.assertTrue(meta["codex_start_attempted"])
+        self.assertIn("fixture job denied", meta["error"])
+        self.assertTrue(meta["task_process_tree_terminated"])
+        self.assertEqual((Path(meta["task_worktree"]) / "a.txt").read_text(), "before\n")
+        self.assertIsNotNone(self.children[0].poll())
+
+    def test_task_unconfirmed_termination_does_not_publish_evidence(self):
+        repo, _ = self.repository()
+        real_stop = runner.stop_task_tree
+        def uncertain(child, job):
+            real_stop(child, job)
+            if child in self.children:
+                raise runner.ProcessCleanupError("fixture unconfirmed task termination")
+        with patch.object(runner, "stop_task_tree", side_effect=uncertain):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["complete"])
+        self.assertIn("unconfirmed", meta["process_cleanup_error"])
+        self.assertTrue(Path(meta["task_worktree"]).is_dir())
+        self.assertFalse((directory / "task-evidence.json").exists())
+        # The fixture already terminated its child; remove its deliberately retained runner temp.
+        shutil.rmtree(meta["retained_temp_directory"])
+
+    def test_task_collection_failure_retains_work_and_invalidates_success(self):
+        repo, _ = self.repository()
+        real_write = runner.write_json
+        def fail_evidence(path, value):
+            if path.name == "task-evidence.json":
+                raise OSError("fixture disk full")
+            return real_write(path, value)
+        with patch.object(runner, "write_json", side_effect=fail_evidence):
+            code, meta, _ = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["complete"])
+        self.assertTrue(meta["worktree_retained"])
+        self.assertIn("task_collection_error", meta)
+        self.assertEqual((Path(meta["task_worktree"]) / "a.txt").read_text(), "implemented\n")
+
+    def test_task_terminal_failure_keeps_worktree(self):
+        repo, _ = self.repository()
+        real_write = runner.write_json
+        def locked(path, value):
+            if path.name == "result.json":
+                raise PermissionError("fixture terminal lock")
+            return real_write(path, value)
+        with patch.object(runner, "write_json", side_effect=locked):
+            code, meta, _ = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertEqual(meta["status"], "artifact_error")
+        self.assertTrue(Path(meta["task_worktree"]).is_dir())
+        self.assertTrue(meta["worktree_retained"])
+        self.assertIn("CODEX_DELEGATION_METADATA=", self.stderr)
+
+    def test_review_still_rejects_file_changes(self):
+        code, meta, _ = self.invoke("review_file_change")
+        self.assertEqual(code, 1)
+        self.assertIn({"unexpected_item": "file_change"}, meta["event_errors"])
+
+    def test_task_result_schema_and_path_validation(self):
+        value = {"complete": True, "summary": "Done", "changed_files": ["src/a.py"],
+                 "tests": [{"command": "python -m unittest", "outcome": "passed", "details": "1 passed"}],
+                 "limitations": []}
+        runner.validate_task(value)
+        for name in ("", "/outside", "C:outside", "../outside", "..\\outside", "\\outside"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                runner.validate_task({**value, "changed_files": [name]})
+        for change in ({"tests": [{"command": "test", "outcome": "maybe", "details": ""}]},
+                       {"complete": 1}, {"limitations": "none"}, {"findings": []}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                runner.validate_task({**value, **change})
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object confirmation")
+    def test_task_failed_job_confirmation_never_becomes_confirmed(self):
+        repo, _ = self.repository()
+        original_job = runner.WindowsTaskJob
+        fixture = self
+        class QueryFailureJob(original_job):
+            def assign_and_resume(self, child):
+                super().assign_and_resume(child)
+                if child in fixture.children:
+                    self.api.QueryInformationJobObject = Mock(side_effect=OSError("fixture accounting unavailable"))
+        with patch.object(runner, "WindowsTaskJob", QueryFailureJob):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["complete"])
+        self.assertIsNot(meta.get("task_process_tree_terminated"), True)
+        self.assertIn("process_cleanup_error", meta)
+        self.assertFalse((directory / "task-evidence.json").exists())
+        self.assertTrue(Path(meta["task_worktree"]).is_dir())
+        shutil.rmtree(meta["retained_temp_directory"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows suspended launch")
+    def test_task_launch_failure_with_successful_cleanup_is_not_cleanup_failure(self):
+        repo, _ = self.repository()
+        original_resume = runner.WindowsTaskJob.assign_and_resume
+        def fail_model(job, child):
+            if child in self.children:
+                raise runner.TaskLaunchError("fixture thread identification failed")
+            return original_resume(job, child)
+        with patch.object(runner.WindowsTaskJob, "assign_and_resume", fail_model):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertEqual(meta["status"], "error")
+        self.assertIn("thread identification failed", meta["error"])
+        self.assertNotIn("process_cleanup_error", meta)
+        self.assertTrue(meta["task_process_tree_terminated"])
+        self.assertTrue(meta["cleanup_complete"])
+        self.assertTrue((directory / "task-evidence.json").exists())
+
+    def test_task_setup_interrupt_survives_secondary_collection_failure(self):
+        repo, _ = self.repository()
+        real_git = runner.git
+        def interrupted_git(repo, *args, **kwargs):
+            if args[:2] == ("worktree", "add"):
+                raise KeyboardInterrupt("fixture setup interrupt")
+            return real_git(repo, *args, **kwargs)
+        with patch.object(runner, "git", side_effect=interrupted_git):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertEqual(meta["status"], "interrupted")
+        self.assertEqual(self.status(directory), "interrupted")
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertIn("task_collection_error", meta)
+        self.assertTrue(meta["secondary_errors"])
+
+    def test_task_timeout_survives_secondary_evidence_write_failure(self):
+        repo, _ = self.repository()
+        real_write = runner.write_json
+        def broken_evidence(path, value):
+            if path.name == "task-evidence.json":
+                raise OSError("fixture evidence disk full")
+            return real_write(path, value)
+        with patch.object(runner, "write_json", side_effect=broken_evidence):
+            code, meta, directory = self.invoke("task_timeout", ["--mode", "task", "--repo", str(repo),
+                                                               "--timeout-seconds", "2"])
+        self.assertEqual(code, 1, meta)
+        self.assertEqual(meta["status"], "timeout")
+        self.assertEqual(self.status(directory), "timeout")
+        self.assertIn("task_collection_error", meta)
+        self.assertTrue(meta["worktree_retained"])
+
+    def test_task_timeout_survives_late_read_error_or_interrupt(self):
+        repo, _ = self.repository()
+        for exception in (PermissionError("fixture unreadable stream"), KeyboardInterrupt("fixture late interrupt")):
+            with self.subTest(error=type(exception).__name__), patch.object(runner, "read_events", side_effect=exception):
+                code, meta, directory = self.invoke("task_timeout", ["--mode", "task", "--repo", str(repo),
+                                                                   "--timeout-seconds", "1"], name=type(exception).__name__)
+                self.assertEqual(code, 1, meta)
+                self.assertEqual(meta["status"], "timeout")
+                self.assertEqual(self.status(directory), "timeout")
+                self.assertTrue(meta["secondary_errors"])
+                self.assertIn(str(exception), meta["error"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sandbox probe cleanup")
+    def test_task_probe_timeout_leaves_no_probe_files_in_evidence(self):
+        repo, _ = self.repository()
+        original_capture, original_unlink = runner.run_capture, Path.unlink
+        def stalled_probe(command, **kwargs):
+            if command[1] == "sandbox":
+                for root in (Path(command[-4]), Path(command[-3])):
+                    (root / command[-1]).write_bytes(b"sandbox-probe")
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return original_capture(command, **kwargs)
+        def uninterrupted_unlink(path, *args, **kwargs):
+            if path.name.startswith(".codex-delegator-probe-") and path.exists():
+                self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+            return original_unlink(path, *args, **kwargs)
+        with patch.object(runner, "run_capture", side_effect=stalled_probe), \
+                patch.object(Path, "unlink", uninterrupted_unlink):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(list(Path(meta["task_worktree"]).glob(".codex-delegator-probe-*")), [])
+        self.assertEqual(list(Path(meta["task_tmp_directory"]).glob(".codex-delegator-probe-*")), [])
+        self.assertEqual(meta["task_evidence"]["actual_changed_files"], [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sandbox probe cleanup")
+    def test_task_probe_uncertain_termination_preserves_files_and_withholds_evidence(self):
+        repo, _ = self.repository()
+        original_capture = runner.run_capture
+        def uncertain_probe(command, **kwargs):
+            if command[1] == "sandbox":
+                (Path(command[-4]) / command[-1]).write_bytes(b"sandbox-probe")
+                raise runner.ProcessCleanupError("fixture probe termination uncertain")
+            return original_capture(command, **kwargs)
+        with patch.object(runner, "run_capture", side_effect=uncertain_probe):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(len(list(Path(meta["task_worktree"]).glob(".codex-delegator-probe-*"))), 1)
+        self.assertNotIn("task_evidence", meta)
+        self.assertFalse((directory / "task-evidence.json").exists())
+        shutil.rmtree(meta["retained_temp_directory"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sandbox probe cleanup")
+    def test_task_probe_cleanup_failure_never_publishes_probe_as_task_output(self):
+        repo, _ = self.repository()
+        original_capture, original_unlink = runner.run_capture, Path.unlink
+        def failed_probe(command, **kwargs):
+            if command[1] == "sandbox":
+                (Path(command[-4]) / command[-1]).write_bytes(b"sandbox-probe")
+                return subprocess.CompletedProcess(command, 1, b"", b"fixture probe failed")
+            return original_capture(command, **kwargs)
+        def locked_probe(path, *args, **kwargs):
+            if path.name.startswith(".codex-delegator-probe-") and path.exists():
+                raise PermissionError("fixture probe file locked")
+            return original_unlink(path, *args, **kwargs)
+        with patch.object(runner, "run_capture", side_effect=failed_probe), patch.object(Path, "unlink", locked_probe):
+            code, meta, directory = self.invoke(extra=["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 1, meta)
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertIn("task_probe_cleanup_error", meta)
+        self.assertNotIn("process_cleanup_error", meta)
+        self.assertNotIn("task_evidence", meta)
+        self.assertFalse((directory / "task-evidence.json").exists())
+
+    def test_linux_disappearing_threads_are_tolerated_but_unreadable_threads_fail_closed(self):
+        # Exercise Linux error handling without requiring a Linux host or killing real processes.
+        class ProcEntry:
+            name = "1234"
+            def __truediv__(self, _):
+                return self
+            def iterdir(self):
+                return iter([self])
+            def read_text(self):
+                raise error("fixture proc race")
+        for error in (FileNotFoundError, ProcessLookupError, PermissionError):
+            with self.subTest(error=error.__name__), \
+                 patch.object(runner.os, "name", "posix"), patch.object(runner.sys, "platform", "linux"), \
+                 patch.object(runner.os, "killpg", create=True), \
+                 patch.object(runner.signal, "SIGKILL", 9, create=True), \
+                 patch.object(runner, "Path", return_value=ProcEntry()):
+                child = Mock(pid=456)
+                if error is PermissionError:
+                    with self.assertRaises(PermissionError):
+                        runner.stop_task_tree(child, None)
+                else:
+                    runner.stop_task_tree(child, None)
+                child.wait.assert_called_once()
+
+    def test_task_temp_scope_excludes_wrapper_artifacts(self):
+        repo, _ = self.repository()
+        code, meta, directory = self.invoke("task_temp_probe", ["--mode", "task", "--repo", str(repo)])
+        self.assertEqual(code, 0, meta)
+        scratch = Path(meta["task_tmp_directory"])
+        self.assertEqual(scratch, directory / "task-tmp")
+        self.assertTrue(meta["task_tmp_retained"])
+        self.assertEqual((scratch / "probe.txt").read_text(), "scratch works")
+        command = self.commands[0]
+        overrides = dict(value.split("=", 1) for i, value in enumerate(command) if i and command[i - 1] == "-c")
+        self.assertEqual(json.loads(overrides["default_permissions"]), meta["task_permission_profile"])
+        prefix = "permissions." + meta["task_permission_profile"] + "."
+        self.assertEqual(overrides[prefix + "extends"], '":workspace"')
+        self.assertEqual(overrides[prefix + "network.enabled"], "false")
+        filesystem = overrides[prefix + "filesystem"]
+        for rule in ('":workspace_roots"={"."="read"}', '":tmpdir"="read"', '":slash_tmp"="read"',
+                     json.dumps(str(directory)) + '="read"',
+                     json.dumps(meta["task_worktree"]) + '="write"', json.dumps(str(scratch)) + '="write"'):
+            self.assertIn(rule, filesystem)
+        self.assertTrue(meta["task_permission_verified"])
+        self.assertNotIn("--sandbox", command)
+        self.assertFalse(any(key.startswith("sandbox_workspace_write.") for key in overrides))
+        self.assertEqual(len(self.permission_preflights), 2)
+        for _, cwd, environment in self.permission_preflights:
+            self.assertEqual(cwd, Path(meta["task_worktree"]))
+            self.assertEqual(environment["TMPDIR"], str(scratch))
+        checked = self.permission_preflights[-1][0]
+        self.assertEqual([value for i, value in enumerate(checked) if i and checked[i - 1] == "-c"],
+                         [value for i, value in enumerate(command) if i and command[i - 1] == "-c"])
+        shell_temp = {name: json.loads(value) for name, value in re.findall(
+            r'(TEMP|TMP|TMPDIR)=("(?:\\.|[^"\\])*")', overrides["shell_environment_policy.set"])}
+        for name in ("TMP", "TEMP", "TMPDIR"):
+            self.assertEqual(self.environments[0][name], str(scratch))
+            self.assertEqual(shell_temp[name], str(scratch))
+        # Review mode has neither task-specific sandbox overrides nor a replacement environment.
+        self.invoke(name="review")
+        self.assertIsNone(self.environments[-1])
+        self.assertFalse(any(value.startswith("sandbox_workspace_write.") for value in self.commands[-1]))
+
+    def test_task_permission_fallback_or_unverified_config_never_starts_model(self):
+        repo, _ = self.repository()
+        for mode in ("task_permission_fallback", "task_permission_unrelated_error",
+                     "task_permission_malformed", "task_permission_rejected"):
+            with self.subTest(mode=mode):
+                code, meta, _ = self.invoke(mode, ["--mode", "task", "--repo", str(repo)], name=mode)
+                self.assertEqual(code, 1, meta)
+                self.assertEqual(meta["status"], "error")
+                self.assertFalse(meta["codex_start_attempted"])
+                self.assertIsNot(meta.get("task_permission_verified"), True)
+                self.assertTrue(Path(meta["task_worktree"]).is_dir())
+        self.assertEqual(self.commands, [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows native execution preflight")
+    def test_task_execution_probe_requires_working_enforced_sandbox(self):
+        repo, _ = self.repository()
+        for mode in ("task_sandbox_blocked", "task_sandbox_missing_marker"):
+            with self.subTest(mode=mode):
+                code, meta, _ = self.invoke(mode, ["--mode", "task", "--repo", str(repo)], name=mode)
+                self.assertEqual(code, 1, meta)
+                self.assertFalse(meta["task_execution_verified"])
+                self.assertFalse(meta["codex_start_attempted"])
+                self.assertTrue(meta["task_permission_verified"])
+                self.assertTrue(meta["worktree_retained"])
+        self.assertEqual(self.commands, [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows native execution preflight")
+    def test_task_dry_run_explicitly_selects_mxc_and_checks_execution(self):
+        repo, _ = self.repository()
+        code, meta, _ = self.invoke(extra=["--mode", "task", "--repo", str(repo), "--dry-run"])
+        self.assertEqual(code, 0, meta)
+        self.assertTrue(meta["task_execution_verified"])
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(len(self.execution_preflights), 1)
+        command, cwd, environment = self.execution_preflights[0]
+        self.assertIn('windows.sandbox="mxc"', command)
+        self.assertIn("--include-managed-config", command)
+        self.assertEqual(command[command.index("--permission-profile") + 1], meta["task_permission_profile"])
+        self.assertEqual(cwd, Path(meta["task_worktree"]))
+        self.assertEqual(environment["TMPDIR"], meta["task_tmp_directory"])
+        self.assertIn("-I", command)
+        self.assertIn("-S", command)
+        self.assertEqual(self.commands, [])
+
+    def test_task_evidence_refuses_preexisting_output_directory_or_file(self):
+        repo, head = self.repository()
+        (repo / "new.txt").write_text("task output", encoding="utf-8")
+        for kind in ("directory", "file"):
+            with self.subTest(kind=kind):
+                directory = self.root / kind
+                directory.mkdir()
+                evidence = directory / "task-untracked"
+                if kind == "directory":
+                    evidence.mkdir()
+                    sentinel = evidence / "new.txt"
+                else:
+                    sentinel = evidence
+                sentinel.write_text("must survive", encoding="utf-8")
+                with self.assertRaises((FileExistsError, ValueError)):
+                    runner.collect_task_evidence(repo, head, directory)
+                self.assertEqual(sentinel.read_text(), "must survive")
+                self.assertFalse((directory / "task-evidence.json").exists())
 
     def test_code_grounded_unlocated_findings(self):
         value = {"complete": True, "summary": "", "limitations": [], "findings": [
