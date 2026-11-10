@@ -5,14 +5,15 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import signal
 import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from claude_process import cleanup_signals, resolve_on_path, run_capture, stop_child
+from claude_process import TERMINATION_SIGNALS, cleanup_signals, resolve_on_path, run_capture, stop_child
 
-VERSION = "8.1.1"
+VERSION = "8.1.2"
 TOOLS = "Read,Glob,Grep,Edit,Write"
 DENIED = "Bash,PowerShell,NotebookEdit,WebFetch,WebSearch"
 PROPOSAL_FIELDS = ("plan_id", "objective", "plan", "executor", "write_paths", "read_paths", "validation")
@@ -37,6 +38,23 @@ def publish(root, name, value):
     temp.replace(root / name)
 
 
+# Code points HFS+/APFS ignore when comparing names, so ".g‌it" opens ".git" there.
+_IGNORED_CODE_POINTS = dict.fromkeys(map(ord, "‌‍‎‏‪‫‬‭‮"
+                                              "⁪⁫⁬⁭⁮⁯﻿"))
+
+
+def protected_part(part):
+    """Match Git and Claude settings directories the way the host filesystem resolves them.
+
+    macOS and Windows compare names case-insensitively, Windows also drops trailing dots and
+    spaces and answers to 8.3 short names, so an exact ".git" comparison is not a boundary.
+    """
+    if part == "..":
+        return True
+    folded = part.translate(_IGNORED_CODE_POINTS).casefold().rstrip(". ")
+    return folded in (".git", ".claude") or re.fullmatch(r"(git|claude)~\d+", folded) is not None
+
+
 def relative_paths(values, label):
     if not isinstance(values, list):
         raise ValueError(label + " must be a list of relative file paths")
@@ -45,7 +63,7 @@ def relative_paths(values, label):
         if not isinstance(value, str) or not value or "\\" in value or ":" in value:
             raise ValueError("Invalid " + label + " path")
         path = PurePosixPath(value)
-        if path.is_absolute() or any(part in ("..", ".git", ".claude") for part in path.parts):
+        if path.is_absolute() or any(protected_part(part) for part in path.parts):
             raise ValueError("Unsafe " + label + " path: " + value)
         if str(path) != value or value == "." or value in result:
             raise ValueError("Non-canonical or duplicate " + label + " path: " + value)
@@ -235,7 +253,7 @@ def main(argv=None):
             arguments += ["--max-budget-usd", str(args.max_budget_usd)]
         env = dict(os.environ, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1", CLAUDE_CODE_MAX_RETRIES="0",
                    CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="false", ENABLE_TOOL_SEARCH="false")
-        for signum in (signal.SIGTERM, signal.SIGINT):
+        for signum in TERMINATION_SIGNALS:
             previous_signals[signum] = signal.signal(signum, interrupt)
         attempted = True
         status("starting")

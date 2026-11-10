@@ -44,6 +44,18 @@ if mode == "malformed":
     print("not valid JSON", flush=True)
 if mode == "unexpected":
     print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}}))
+if mode == "inspect_evidence":
+    assert "--restricted" in sys.argv
+    evidence = Path(sys.argv[sys.argv.index("--add-dir") + 1])
+    patch_file = evidence / "changes.patch"
+    assert patch_file.read_bytes() and (evidence / "manifest.json").is_file()
+    guidance = Path(sys.argv[sys.argv.index("--append-system-prompt-file") + 1]).read_text(encoding="utf-8")
+    assert str(patch_file) in guidance and str(evidence / "manifest.json") in guidance
+    tools = [{"type": "tool_use", "name": "Read", "input": {"file_path": str(patch_file)}},
+             {"type": "tool_use", "name": "Read", "input": {"file_path": "a.txt"}},
+             {"type": "tool_use", "name": "Read", "input": {"file_path": os.environ["CLAUDE_PY_TEST_OUTSIDE"]}},
+             {"type": "tool_use", "name": "Grep", "input": {"pattern": "key", "path": "~/.ssh"}}]
+    print(json.dumps({"type": "assistant", "message": {"content": tools}}))
 if mode == "inspect_snapshot":
     expected = json.loads(os.environ["CLAUDE_PY_TEST_FILES"])
     for name, data in expected.items():

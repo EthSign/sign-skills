@@ -52,6 +52,8 @@ def _metadata(native: bool, collab: bool, exit_code: int | None, timed_out: bool
         "tool_call_count": 0,
         "tool_usage": {},
         "inspected_paths": [],
+        "out_of_snapshot_paths": [],
+        "native_inspection_observed": False,
         "unexpected_tool_calls": [],
         "unexpected_tool_policy": "diagnostic_cli_enforced" if native else "fatal",
         "metadata_collection_error": None,
@@ -92,7 +94,10 @@ def _review_path(value: str, snapshot: Path | None, evidence: Path | None) -> st
     """Map paths below the temporary roots to stable review-relative names."""
 
     try:
-        full = os.path.abspath(os.path.normpath(value))
+        # A relative tool path is relative to the reviewer's working directory, the snapshot,
+        # not to wherever this wrapper happens to run.
+        anchored = value if snapshot is None or os.path.isabs(value) or value.startswith("~") else os.path.join(os.fspath(snapshot), value)
+        full = os.path.abspath(os.path.normpath(anchored))
         folded_full = os.path.normcase(full)
         for root, label in ((snapshot, "repository"), (evidence, "evidence")):
             if root is None:
@@ -108,6 +113,29 @@ def _review_path(value: str, snapshot: Path | None, evidence: Path | None) -> st
     except (OSError, TypeError, ValueError):
         pass
     return value
+
+
+def _within_review_roots(value: str, snapshot: Path | None, evidence: Path | None) -> bool:
+    """Whether a tool path resolves inside the snapshot or evidence roots.
+
+    Relative paths belong to the reviewer's working directory, which is the snapshot.
+    Symlinks are resolved so a repository link that points outside is not counted as inside.
+    """
+
+    if snapshot is None or value.startswith("~"):
+        return False
+    try:
+        candidate = value if os.path.isabs(value) else os.path.join(os.fspath(snapshot), value)
+        full = os.path.normcase(os.path.realpath(candidate))
+        for root in (snapshot, evidence):
+            if root is None:
+                continue
+            full_root = os.path.normcase(os.path.realpath(os.fspath(root)))
+            if full == full_root or full.startswith(full_root.rstrip("/\\") + os.sep):
+                return True
+    except (OSError, TypeError, ValueError):
+        pass
+    return False
 
 
 def _number(value: Any) -> int | float | None:
@@ -246,6 +274,8 @@ def parse_stream(
     tool_usage: dict[str, int] = {}
     tool_names: dict[str, str] = {}
     inspected: dict[str, str] = {}
+    outside: dict[str, str] = {}
+    inside_seen = False
     unexpected: dict[str, str] = {}
     allowlist = _NATIVE_TOOL_ALLOWLIST_FOLDED if native else frozenset()
 
@@ -295,6 +325,11 @@ def parse_stream(
                         if isinstance(value, str) and value:
                             reviewed_path = _review_path(value, snapshot, evidence)
                             inspected.setdefault(reviewed_path.casefold(), reviewed_path)
+                            if native:
+                                if _within_review_roots(value, snapshot, evidence):
+                                    inside_seen = True
+                                else:
+                                    outside.setdefault(value.casefold(), value)
                 continue
             if message_type == "stream_event":
                 event = message.get("event")
@@ -313,6 +348,10 @@ def parse_stream(
     metadata["tool_usage"] = tool_usage
     metadata["tool_call_count"] = sum(tool_usage.values())
     metadata["inspected_paths"] = sorted(inspected.values(), key=str.casefold)
+    # Diagnostics, like unexpected_tool_calls: the CLI's restricted mode is the enforcement, and
+    # some CLI versions do not stream the bundled reviewer's tool calls at all.
+    metadata["out_of_snapshot_paths"] = sorted(outside.values(), key=str.casefold)
+    metadata["native_inspection_observed"] = inside_seen
     metadata["unexpected_tool_calls"] = sorted(unexpected.values(), key=str.casefold)
     metadata["recovered_output_chars"] = len(recovered)
 

@@ -287,8 +287,131 @@ class RunnerTests(unittest.TestCase):
         value = {"complete": True, "summary": "", "limitations": [], "findings": [
             {"priority": "P2", "file": "", "line": 0, "title": "plan", "body": "text"}]}
         runner.validate_review(value)
-        with self.assertRaises(ValueError):
-            runner.validate_review(value, repository=True)
+        # The diff-mode prompt asks for this shape for plan or objective findings.
+        runner.validate_review(value, repository=True)
+        for name, line in (("", 1), ("a.txt", 0)):
+            value["findings"][0].update(file=name, line=line)
+            with self.subTest(file=name, line=line), self.assertRaises(ValueError):
+                runner.validate_review(value, repository=True)
+
+    def test_unlocated_finding_does_not_discard_a_diff_review(self):
+        repo, base = self.repository()
+        (repo / "a.txt").write_text("after\n", encoding="utf-8")
+        runner.git(repo, "commit", "-am", "head")
+        modes = (("committed", ["--base", base]), ("working", ["--working-tree"]))
+        (repo / "a.txt").write_text("dirty\n", encoding="utf-8")
+        for name, extra in modes:
+            with self.subTest(mode=name):
+                code, meta, directory = self.invoke("document_finding", ["--repo", str(repo), *extra], name=name)
+                self.assertEqual(code, 0, meta)
+                self.assertNotIn("review_parse_error", meta)
+                review = json.loads((directory / "result.json").read_text(encoding="utf-8"))["review"]
+                self.assertEqual([(item["file"], item["line"]) for item in review["findings"]], [("", 0), ("a.txt", 1)])
+        prompt_copy = self.root / "prompt-copy.txt"
+        self.invoke(extra=["--repo", str(repo), "--working-tree"], name="prompt", env={"DELEGATOR_TEST_PROMPT_COPY": str(prompt_copy)})
+        self.assertIn("for a finding with no code location", prompt_copy.read_text(encoding="utf-8"))
+
+    def test_unencodable_model_text_is_published(self):
+        code, meta, directory = self.invoke("surrogate")
+        self.assertEqual(code, 0, meta)
+        self.assertEqual(self.status(directory), "complete")
+        result = json.loads((directory / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["review"]["summary"], "looks fine \ud83d")
+        self.assertEqual([path.name for path in directory.iterdir() if path.name.endswith(".tmp")], [])
+
+    def test_unencodable_metadata_cannot_escape_terminal_publication(self):
+        meta = {"status": "complete", "complete": True, "codex_started": True, "codex_start_attempted": True}
+        output = io.StringIO()
+        failure = UnicodeEncodeError("utf-8", "\ud83d", 0, 1, "surrogates not allowed")
+        with patch.object(runner, "write_json", side_effect=failure), contextlib.redirect_stderr(output):
+            runner.publish_terminal(self.root, meta, {"complete": True})
+        self.assertEqual(json.loads(output.getvalue().split("=", 1)[1])["status"], "artifact_error")
+
+    def test_staged_submodule_in_working_tree_is_refused(self):
+        repo, _ = self.repository()
+        nested = repo / "vendor" / "lib"
+        nested.mkdir(parents=True)
+        runner.git(nested, "init")
+        runner.git(nested, "config", "user.email", "offline@example.invalid")
+        runner.git(nested, "config", "user.name", "Offline Test")
+        (nested / "lib.txt").write_text("nested content\n", encoding="utf-8")
+        runner.git(nested, "add", ".")
+        runner.git(nested, "commit", "-m", "nested")
+        runner.git(repo, "add", "vendor/lib")
+        self.assertIn(b"160000 ", runner.git(repo, "ls-files", "--stage"))
+        code, meta, _ = self.invoke(extra=["--repo", str(repo), "--working-tree"])
+        self.assertEqual(code, 1)
+        self.assertEqual(meta["status"], "error")
+        self.assertIn("Submodules are not supported", meta["error"])
+        self.assertFalse(meta["codex_start_attempted"])
+        self.assertEqual(self.children, [])
+
+    def test_inherited_git_location_variables_do_not_touch_another_index(self):
+        repo, head = self.repository()
+        (repo / "a.txt").write_text("changed\n", encoding="utf-8")
+        (repo / "c.txt").write_text("tracked later\n", encoding="utf-8")
+        before = runner.git(repo, "status", "--porcelain")
+        self.assertEqual(before, b" M a.txt\n?? c.txt\n")
+        hostile = {"GIT_DIR": str(repo / ".git"), "GIT_WORK_TREE": str(repo), "GIT_INDEX_FILE": str(repo / ".git" / "index")}
+        code, meta, directory = self.invoke("git_environment", ["--repo", str(repo), "--working-tree"], env=hostile)
+        self.assertEqual(code, 0, meta)
+        self.assertEqual(meta["head"], head)
+        # Snapshot preparation applies the diff with --index; that must land in the snapshot's index.
+        self.assertEqual(runner.git(repo, "status", "--porcelain"), before)
+        self.assertEqual(json.loads((directory / "result.json").read_text(encoding="utf-8"))["review"]["summary"], "")
+        self.assertEqual(runner.git(repo, "worktree", "list", "--porcelain").count(b"worktree "), 1)
+
+    def test_failed_worktree_add_leaves_no_registration(self):
+        repo, base = self.repository()
+        (repo / "a.txt").write_text("after\n", encoding="utf-8")
+        runner.git(repo, "commit", "-am", "head")
+        real_git = runner.git
+        for name, leave_locked in (("locked", True), ("clean", False)):
+            def failing(target, *args, **kwargs):
+                if args[:2] == ("worktree", "add"):
+                    if leave_locked:
+                        # What a killed `worktree add` leaves: a registered, locked, partial worktree.
+                        real_git(target, *args, **kwargs)
+                        real_git(target, "worktree", "lock", args[-2])
+                    raise RuntimeError("Git failed: simulated checkout timeout")
+                return real_git(target, *args, **kwargs)
+            with self.subTest(name=name), patch.object(runner, "git", side_effect=failing):
+                code, meta, _ = self.invoke(extra=["--repo", str(repo), "--base", base], name=name)
+                self.assertEqual(code, 1)
+                self.assertEqual(meta["status"], "error", meta)
+                self.assertIn("simulated checkout timeout", meta["error"])
+                self.assertTrue(meta["cleanup_complete"])
+                self.assertFalse(meta["codex_start_attempted"])
+            self.assertEqual(real_git(repo, "worktree", "list", "--porcelain").count(b"worktree "), 1)
+
+    def test_registered_worktree_that_cannot_be_removed_is_retained(self):
+        repo, base = self.repository()
+        (repo / "a.txt").write_text("after\n", encoding="utf-8")
+        runner.git(repo, "commit", "-am", "head")
+        real_git = runner.git
+        def stubborn(target, *args, **kwargs):
+            if args[:2] == ("worktree", "remove"):
+                raise RuntimeError("Git failed: simulated removal failure")
+            return real_git(target, *args, **kwargs)
+        with patch.object(runner, "git", side_effect=stubborn):
+            code, meta, _ = self.invoke(extra=["--repo", str(repo), "--base", base])
+        self.assertEqual(code, 1)
+        self.assertEqual(meta["status"], "cleanup_failed")
+        self.assertIn("still registered", meta["cleanup_error"])
+        retained = Path(meta["retained_temp_directory"])
+        self.assertTrue((retained / "snapshot").is_dir())
+        real_git(repo, "worktree", "remove", "--force", str(retained / "snapshot"))
+        shutil.rmtree(retained)
+
+    def test_git_timeout_is_bounded_and_applied(self):
+        self.addCleanup(setattr, runner, "GIT_TIMEOUT", runner.GIT_TIMEOUT)
+        for index, value in enumerate(("4", "601")):
+            code, meta, _ = self.invoke(extra=["--git-timeout-seconds", value], name=f"git-timeout-{index}")
+            self.assertEqual(code, 1)
+            self.assertFalse(meta["codex_start_attempted"])
+            self.assertIn("Git timeout", meta["error"])
+        self.assertEqual(self.invoke(extra=["--git-timeout-seconds", "300", "--dry-run"], name="git-timeout-ok")[0], 0)
+        self.assertEqual(runner.GIT_TIMEOUT, 300)
 
     def test_git_diff_prefix_overrides(self):
         repo, _ = self.repository()
@@ -523,7 +646,9 @@ class RunnerTests(unittest.TestCase):
         child.wait.assert_called_once()
 
     def test_repeated_signals_are_ignored_during_cleanup_then_restored(self):
-        before = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+        if hasattr(signal, "SIGHUP"):
+            self.assertIn(signal.SIGHUP, runner.TERMINATION_SIGNALS)
+        before = {number: signal.getsignal(number) for number in runner.TERMINATION_SIGNALS}
         with runner.cleanup_signals():
             for number in before:
                 self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
@@ -534,12 +659,12 @@ class RunnerTests(unittest.TestCase):
     def test_cleanup_and_publication_shield_repeated_signals(self):
         original, seen = runner.publish_terminal, []
         def guarded(*args):
-            seen.append({number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)})
+            seen.append({number: signal.getsignal(number) for number in runner.TERMINATION_SIGNALS})
             return original(*args)
         with patch.object(runner, "publish_terminal", side_effect=guarded):
             code, _, _ = self.invoke()
         self.assertEqual(code, 0)
-        self.assertEqual(seen, [{signal.SIGINT: signal.SIG_IGN, signal.SIGTERM: signal.SIG_IGN}])
+        self.assertEqual(seen, [dict.fromkeys(runner.TERMINATION_SIGNALS, signal.SIG_IGN)])
 
     def test_interrupt_publishes_terminal_interrupted_status(self):
         repo, _ = self.repository()
@@ -559,6 +684,14 @@ class RunnerTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX signal delivery to a separate wrapper process")
     def test_wrapper_process_sigterm_is_interrupted_and_repeats_are_ignored(self):
+        self.signal_wrapper_process(signal.SIGTERM)
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal delivery to a separate wrapper process")
+    def test_wrapper_process_hangup_is_interrupted_and_stops_codex(self):
+        # A closing terminal or lost host session: Codex is in its own session and never sees it.
+        self.signal_wrapper_process(signal.SIGHUP)
+
+    def signal_wrapper_process(self, number):
         shims = self.root / "bin"
         shims.mkdir()
         codex = shims / "codex"
@@ -578,7 +711,7 @@ class RunnerTests(unittest.TestCase):
                     self.fail("Wrapper did not reach the running state")
                 time.sleep(0.05)
             for _ in range(3):
-                wrapper.send_signal(signal.SIGTERM)
+                wrapper.send_signal(number)
                 time.sleep(0.02)
             out, err = wrapper.communicate(timeout=60)
         finally:
@@ -655,11 +788,11 @@ class RunnerTests(unittest.TestCase):
     def test_code_grounded_unlocated_findings(self):
         value = {"complete": True, "summary": "", "limitations": [], "findings": [
             {"priority": "P2", "file": "", "line": 0, "title": "document", "body": "text"}]}
-        runner.validate_review(value, repository=True, allow_unlocated=True)
+        runner.validate_review(value, repository=True)
         for name, line in (("", 1), ("a.txt", 0), ("/outside.py", 1), ("../a.py", 1)):
             value["findings"][0].update(file=name, line=line)
             with self.subTest(file=name, line=line), self.assertRaises(ValueError):
-                runner.validate_review(value, repository=True, allow_unlocated=True)
+                runner.validate_review(value, repository=True)
 
 
 if __name__ == "__main__":
