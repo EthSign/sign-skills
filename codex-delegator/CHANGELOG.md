@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.1 — 2026-11-10
+
+Fixes from a review of 1.1.0. Review modes, defaults, and the result contract are unchanged except where noted.
+
+### Fixed
+
+- Model output containing a lone surrogate no longer crashes terminal publication after a paid call. JSON artifacts are written with ASCII escapes through a uniquely named temporary file that is removed on failure, and encoding errors are handled like other artifact write failures.
+- Git commands and the Codex child no longer inherit `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, or the related object and namespace variables. Started from a Git hook in a linked worktree, snapshot preparation previously staged files in the caller's real index. Read-only Git commands also run with `GIT_OPTIONAL_LOCKS=0`.
+- Working-tree mode refuses a submodule that is only staged. The earlier check looked at the committed tree alone and silently omitted the submodule's content.
+- A finding with an empty file and line 0 is accepted in committed and working-tree modes, as the prompt already requested for plan or objective findings. One such finding previously invalidated the whole review.
+- A failed or timed-out `git worktree add` no longer leaves a locked worktree registered in the source repository. Cleanup always attempts a forced removal and retains the temporary root only when Git still lists the snapshot; a clean add failure now reports `error` rather than `cleanup_failed`.
+- SIGHUP is handled like SIGINT and SIGTERM. A closed terminal previously killed the wrapper while Codex kept running with no terminal artifacts and a registered snapshot.
+
+### Added
+
+- `--git-timeout-seconds` (default 60, range 5 to 600) for repositories whose checkout exceeds the fixed limit.
+
+### Validation
+
+- 55 offline tests (54 run on macOS; one is Windows-only) pass on macOS with Python 3.11, and the suite also passes on Python 3.9. Each new regression test fails against the 1.1.0 runner. A no-model working-tree `--dry-run` passed against `codex-cli 0.163.0`. No real model run, Windows run, or Linux run was performed.
+
 ## 1.1.0 — 2026-10-14
 
 Brings the process hardening and ergonomics of `claude-delegator` 8.x to this skill and adds code-grounded reviews. Collab mode and an executor helper are out of scope; the default model (Codex's built-in choice) and `medium` effort are unchanged.

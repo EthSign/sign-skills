@@ -59,6 +59,11 @@ if mode != "missing_final":
         # Report what the code-grounded snapshot actually contains.
         snapshot = next(line.split(": ", 1)[1] for line in prompt.splitlines() if line.startswith("Snapshot: "))
         result["summary"] = (Path(snapshot) / "a.txt").read_text(encoding="utf-8")
+    if mode == "surrogate":
+        # A lone surrogate is valid JSON but cannot be encoded as UTF-8 text.
+        result["summary"] = "looks fine \ud83d"
+    if mode == "git_environment":
+        result["summary"] = ",".join(sorted(key for key in os.environ if key in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")))
     if mode == "document_finding":
         result["findings"] = [
             {"priority": "P2", "file": "", "line": 0, "title": "Document claim", "body": "No code location"},
