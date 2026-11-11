@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install.py"
 BEGIN = "<!-- claude-agent-ladder:begin -->"
 END = "<!-- claude-agent-ladder:end -->"
-NAMES = ["deep-worker", "explorer", "std-worker", "verifier"]
+NAMES = ["cross-verifier", "deep-worker", "explorer", "frontier-worker", "scout", "std-worker", "verifier"]
+READ_ONLY = ("scout", "explorer")
+SPAWNERS = ("frontier-worker", "verifier", "cross-verifier")
 
 
 def sha(data: bytes) -> str:
@@ -61,7 +63,7 @@ class InstallTests(unittest.TestCase):
         before = self.claude_md.read_bytes()
         r = self.run_install()
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.count(": unchanged"), 6)
+        self.assertEqual(r.stdout.count(": unchanged"), len(NAMES) + 2)
         self.assertIn("claude-agent-ladder.manifest.json: unchanged", r.stdout)
         self.assertNotIn("created", r.stdout)
         self.assertEqual(self.claude_md.read_bytes(), before)
@@ -464,18 +466,48 @@ class ShippedAgentTests(unittest.TestCase):
         text = (ROOT / "subagents" / f"{name}.md").read_text(encoding="utf-8")
         return text.split("\n---\n", 1)
 
+    def field(self, name, key):
+        head, _ = self.frontmatter(name)
+        line = next((l for l in head.splitlines() if l.startswith(f"{key}:")), "")
+        return line.partition(":")[2].strip()
+
+    def disallowed(self, name):
+        return [t.strip() for t in self.field(name, "disallowedTools").split(",")]
+
+    def test_names_match_shipped_files(self):
+        self.assertEqual(sorted(p.stem for p in (ROOT / "subagents").glob("*.md")), sorted(NAMES))
+
     def test_no_tier_can_use_monitor(self):
         for name in NAMES:
-            head, _ = self.frontmatter(name)
-            line = next((l for l in head.splitlines() if l.startswith("disallowedTools:")), "")
-            tools = [t.strip() for t in line.partition(":")[2].split(",")]
-            self.assertIn("Monitor", tools, name)
+            self.assertIn("Monitor", self.disallowed(name), name)
+
+    def test_read_only_tiers_cannot_edit(self):
+        for name in READ_ONLY:
+            for tool in ("Write", "Edit", "NotebookEdit"):
+                self.assertIn(tool, self.disallowed(name), name)
+
+    def test_only_evidence_gathering_tiers_can_spawn(self):
+        for name in NAMES:
+            self.assertEqual("Agent" not in self.disallowed(name), name in SPAWNERS, name)
 
     def test_command_running_tiers_have_waiting_rule(self):
-        for name in ("std-worker", "deep-worker", "verifier"):
+        for name in NAMES:
+            if name in READ_ONLY:
+                continue
             _, body = self.frontmatter(name)
             self.assertIn("- Waiting:", body, name)
             self.assertIn("never start a second copy", body, name)
+
+    def test_rules_table_matches_frontmatter(self):
+        rules = (ROOT / "rules.md").read_text(encoding="utf-8")
+        rows = {}
+        for line in rules.splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) == 4 and cells[1].startswith("`") and cells[1].endswith("`"):
+                rows[cells[1].strip("`")] = cells[2]
+        self.assertEqual(sorted(rows), sorted(NAMES))
+        for name in NAMES:
+            self.assertEqual(rows[name], f"{self.field(name, 'model')} / {self.field(name, 'effort')}", name)
 
 
 if __name__ == "__main__":
