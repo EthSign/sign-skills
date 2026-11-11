@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PACKAGE = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("ladder_install", PACKAGE / "scripts/install.py")
@@ -102,7 +103,7 @@ class InstallationTests(unittest.TestCase):
 
     def test_identical_preexisting_profile_is_not_owned(self):
         self.worker().parent.mkdir(parents=True)
-        data = (self.source / "assets/subagents/ladder-worker.toml").read_bytes()
+        data = installer.normalized((self.source / "assets/subagents/ladder-worker.toml").read_text()).encode()
         self.worker().write_bytes(data)
         self.assertEqual(self.run_install(), 0)
         self.assertNotIn("agents/ladder-worker.toml", self.manifest()["files"])
@@ -196,6 +197,101 @@ class InstallationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_install()
         self.assertFalse(self.target.exists())
+
+    def test_profile_permission_override_rejected_before_writes(self):
+        profile = self.source / "assets/subagents/ladder-scout.toml"
+        profile.write_text('sandbox_mode = "read-only"\n' + profile.read_text())
+        with self.assertRaisesRegex(ValueError, "parent session"):
+            self.run_install()
+        self.assertFalse(self.target.exists())
+
+    def interrupt_after(self, predicate, **kwargs):
+        execute = installer.execute
+
+        def interrupted(changes, layout, dry_run):
+            for change in changes:
+                execute([change], layout, dry_run)
+                if predicate(change):
+                    raise OSError("injected interruption")
+            self.fail("Interruption point was not reached")
+
+        with mock.patch.object(installer, "execute", side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, "injected interruption"):
+                self.run_install(**kwargs)
+
+    def test_interrupted_install_retry_retains_ownership(self):
+        self.interrupt_after(lambda change: change.path == self.layout.skill / "SKILL.md")
+        before = self.files()
+        self.assertEqual(self.run_install(verify=True), 1)
+        self.assertEqual(self.run_install(dry_run=True), 1)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.run_install(), 0)
+        self.assertEqual(self.run_install(verify=True), 0)
+        self.assertEqual(self.run_install(uninstall=True), 0)
+        self.assertFalse((self.layout.skill / "SKILL.md").exists())
+        self.assertFalse((self.target / f"{installer.NAME}.transaction.json").exists())
+
+    def test_interrupted_install_preserves_subsequent_customization(self):
+        self.interrupt_after(lambda change: change.path == self.layout.skill / "SKILL.md")
+        installed = self.layout.skill / "SKILL.md"
+        custom = installed.read_bytes() + b"\nUser customization\n"
+        installed.write_bytes(custom)
+        self.assertEqual(self.run_install(uninstall=True), 1)
+        self.assertEqual(installed.read_bytes(), custom)
+
+    def test_interrupted_update_recovers_new_hash_and_routing(self):
+        self.assertEqual(self.run_install(), 0)
+        profile = self.source / "assets/subagents/ladder-worker.toml"
+        profile.write_text(profile.read_text().replace('"medium"', '"high"'))
+        routing = self.source / "assets/routing.md"
+        routing.write_text(routing.read_text().replace("Keep quick", "Keep small"))
+        self.interrupt_after(lambda change: change.path == self.target / "AGENTS.md")
+        self.assertEqual(self.run_install(), 0)
+        self.assertEqual(self.run_install(verify=True), 0)
+        self.assertEqual(self.run_install(uninstall=True), 0)
+        self.assertFalse(self.worker().exists())
+        self.assertNotIn(installer.BEGIN, (self.target / "AGENTS.md").read_text())
+
+    def test_interrupted_uninstall_can_finish(self):
+        self.assertEqual(self.run_install(), 0)
+        self.interrupt_after(lambda change: change.action == "remove", uninstall=True)
+        self.assertEqual(self.run_install(uninstall=True), 0)
+        self.assertFalse((self.layout.skill / "SKILL.md").exists())
+        self.assertFalse(self.worker().exists())
+        self.assertNotIn(installer.BEGIN, (self.target / "AGENTS.md").read_text())
+
+    def test_interrupted_uninstall_from_installed_source_can_finish(self):
+        self.assertEqual(self.run_install(), 0)
+        self.source = self.layout.skill
+        self.interrupt_after(lambda change: change.path == self.source / "SKILL.md", uninstall=True)
+        self.assertFalse((self.source / "SKILL.md").exists())
+        script = self.source / "scripts/install.py"
+        result = subprocess.run([sys.executable, str(script), "--codex-dir", str(self.target),
+                                 "--uninstall"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.worker().exists())
+        self.assertFalse(script.exists())
+
+    def test_uninstall_preserves_malformed_bundled_customization(self):
+        self.assertEqual(self.run_install(), 0)
+        self.source = self.layout.skill
+        profile = self.source / "assets/subagents/ladder-scout.toml"
+        profile.write_bytes(b"invalid TOML customization [")
+        self.assertEqual(self.run_install(uninstall=True), 1)
+        self.assertEqual(profile.read_bytes(), b"invalid TOML customization [")
+        self.assertFalse(self.worker().exists())
+        self.assertNotIn(installer.BEGIN, (self.target / "AGENTS.md").read_text())
+
+    def test_invalid_transaction_rejected_without_mutation(self):
+        self.interrupt_after(lambda change: change.path == self.layout.skill / "SKILL.md")
+        journal = self.target / f"{installer.NAME}.transaction.json"
+        record = json.loads(journal.read_text())
+        record["after"]["files"]["../outside.txt"] = "0" * 64
+        journal.write_text(json.dumps(record))
+        before = self.files()
+        with self.assertRaises(ValueError):
+            self.run_install()
+        self.assertEqual(before, self.files())
 
     def test_manifest_traversal_is_rejected(self):
         self.run_install()
