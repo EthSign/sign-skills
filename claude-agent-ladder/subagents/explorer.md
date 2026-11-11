@@ -1,6 +1,6 @@
 ---
 name: explorer
-description: Read-only research tier (Sonnet, low effort). Use when exploration would flood the main context - how a subsystem is wired, every call site of a function, which files implement a feature, the structure of a module. Single lookups belong in the main session; for exhaustive multi-location or naming-convention sweeps use the built-in Explore.
+description: Read-only research tier (Sonnet, low effort). Use when exploration would flood the main context - how a subsystem is wired, every call site of a function, which files implement a feature, the structure of a module. Single lookups belong in the main session; bulk mechanical extraction across many files goes to scout; for exhaustive multi-location or naming-convention sweeps use the built-in Explore.
 model: sonnet
 effort: low
 disallowedTools: Write, Edit, NotebookEdit, Agent, Monitor
