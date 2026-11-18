@@ -20,6 +20,20 @@ NAME = "codex-agent-ladder"
 BEGIN = f"<!-- {NAME}:begin -->"
 END = f"<!-- {NAME}:end -->"
 PROFILES = ("ladder-scout", "ladder-worker", "ladder-deep-worker", "ladder-verifier")
+# SHA-256 of the normalized files shipped before roles became unpinned.
+LEGACY_INSTALLERS = {
+    "859e233d88c561482159a1573605f7d57ca3711df50a5df45b19b909cdbc1c54",  # 1132d1d
+    "d3ac30697cc0e6a6ed31bfa7fe9d592a889b106a7687b12cdaf41f453dbb9185",  # 958dcc9
+    "ae6a27b3a3e645c4d80f4563d9370b539c3379a690888457531a2af442679f91",  # f9b0a68
+}
+LEGACY_ROLES = {
+    "4a9609f0c7762ec228a116fb3494736e3714a07250b8ef254821853bce1d7e23",  # ladder-deep-worker at 1132d1d
+    "e94631539aa7245f2e86686b23e0242ab5206f130a88217bbb067617ef2747bd",  # ladder-scout at 1132d1d
+    "619b59160c4c97eea2df1fd99c9836eb18e26251316be02640b69458d3b9587b",  # ladder-scout at 958dcc9
+    "df66f198023c7682c17a70de8fb8a558b868b33010f66c86f2551cb1613de198",  # ladder-verifier at 1132d1d
+    "763e0a31ae465f6d5d50bae8489089f4e7d54cb2ad46fd7d0f00b16589734f39",  # ladder-verifier at 958dcc9
+    "173bc98000024ae77f4ad98efa1932569f6c26a275211113258d0e54579c0cb5",  # ladder-worker at 1132d1d
+}
 RESOURCES = (
     "SKILL.md", "agents/openai.yaml", "references/installation.md",
     "scripts/install.py", "assets/routing.md",
@@ -95,19 +109,30 @@ class Layout:
             profile = tomllib.loads(data.decode("utf-8"))
             if profile.get("name") != name.replace("-", "_"):
                 raise ValueError(f"Invalid profile name: {name}")
-            for key in ("description", "model", "developer_instructions"):
+            for key in ("description", "developer_instructions"):
                 if not isinstance(profile.get(key), str) or not profile[key].strip():
                     raise ValueError(f"Missing {key} in {name}")
-            if profile.get("model_reasoning_effort") not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+            if "model" in profile and (not isinstance(profile["model"], str) or not profile["model"].strip()):
+                raise ValueError(f"Invalid model in {name}")
+            if "model_reasoning_effort" in profile and profile["model_reasoning_effort"] not in (
+                "low", "medium", "high", "xhigh", "max", "ultra",
+            ):
                 raise ValueError(f"Invalid reasoning effort in {name}")
-            if profile.get("sandbox_mode") not in {None, "read-only", "workspace-write"}:
-                raise ValueError(f"Unsupported sandbox mode in {name}")
-            if name in {"ladder-scout", "ladder-verifier"} and profile.get("sandbox_mode") != "read-only":
-                raise ValueError(f"Read-only role requires a read-only profile: {name}")
+            if "sandbox_mode" in profile or "approval_policy" in profile:
+                raise ValueError(f"Configure permissions on the parent session, not profile {name}")
             files[self.codex / "agents" / f"{name}.toml"] = data
         for path in files:
             self.check(path)
         return files
+
+    def removal_targets(self) -> dict[Path, bytes]:
+        # Uninstall may run from its own partially removed or customized package.
+        # Its allowlist must not depend on the contents of those source files.
+        paths = [self.skill / relative for relative in RESOURCES]
+        paths.extend(self.codex / "agents" / f"{name}.toml" for name in PROFILES)
+        for path in paths:
+            self.check(path)
+        return dict.fromkeys(paths, b"")
 
 
 def bounds(text: str) -> tuple[int, int] | None:
@@ -153,8 +178,11 @@ def active_guidance(layout: Layout) -> Path:
 def load_manifest(path: Path, layout: Layout, desired: dict[Path, bytes]) -> dict:
     layout.check(path)
     if not path.exists():
-        return {"schema": 1, "files": {}, "rules": None}
-    record = json.loads(read_text(path).lstrip("\ufeff"))
+        return {"schema": 1, "files": {}, "rules": None, "legacy_profiles": []}
+    return validate_manifest(json.loads(read_text(path).lstrip("\ufeff")), layout, desired)
+
+
+def validate_manifest(record: dict, layout: Layout, desired: dict[Path, bytes]) -> dict:
     if not isinstance(record, dict) or record.get("schema") != 1 or not isinstance(record.get("files"), dict):
         raise ValueError("Invalid ladder manifest")
     allowed = {layout.key(p) for p in desired}
@@ -163,6 +191,19 @@ def load_manifest(path: Path, layout: Layout, desired: dict[Path, bytes]) -> dic
         if key not in allowed or not valid_hash(value):
             raise ValueError(f"Invalid manifest entry: {key}")
         layout.check(layout.root / key)
+    # A legacy installer owned released profile bytes. A newer installer may
+    # have installed those exact bytes from an explicitly pinned source bundle.
+    legacy = record.get("legacy_profiles")
+    if "legacy_profiles" not in record:
+        script = layout.skill / "scripts/install.py"
+        installer_hash = record["files"].get(layout.key(script))
+        record["legacy_profiles"] = [
+            key for key, checksum in record["files"].items()
+            if installer_hash in LEGACY_INSTALLERS and checksum in LEGACY_ROLES
+        ]
+    elif (not isinstance(legacy, list) or
+          any(not isinstance(key, str) or record["files"].get(key) not in LEGACY_ROLES for key in legacy)):
+        raise ValueError("Invalid legacy profile entry")
     rules = record.get("rules")
     if rules is not None:
         allowed_rules = {layout.key(layout.guidance / name) for name in ("AGENTS.md", "AGENTS.override.md")}
@@ -170,6 +211,45 @@ def load_manifest(path: Path, layout: Layout, desired: dict[Path, bytes]) -> dic
             raise ValueError("Invalid routing manifest entry")
         layout.check(layout.root / rules["path"])
     return record
+
+
+def recover_ownership(journal: Path, manifest: Path, layout: Layout,
+                      desired: dict[Path, bytes]) -> None:
+    """Recover ownership only; never replay writes over user files."""
+    record = json.loads(read_text(journal))
+    if not isinstance(record, dict) or record.get("schema") != 1:
+        raise ValueError("Invalid ladder transaction journal")
+    before = validate_manifest(record.get("before"), layout, desired)
+    after = validate_manifest(record.get("after"), layout, desired)
+    owned = {}
+    legacy = []
+    for key in before["files"].keys() | after["files"].keys():
+        path = layout.root / key
+        if not path.exists():
+            continue
+        current = digest(path.read_bytes())
+        # Keep the previous owner for incomplete updates. Subsequent edits stay
+        # protected because their bytes differ from the recorded ownership hash.
+        owner = after if current == after["files"].get(key) or key not in before["files"] else before
+        owned[key] = owner["files"][key]
+        if key in owner["legacy_profiles"]:
+            legacy.append(key)
+    old_rules, new_rules = before.get("rules"), after.get("rules")
+    rules = old_rules or new_rules
+    if rules:
+        text = read_text(layout.root / rules["path"])
+        span = bounds(text)
+        if span is None:
+            rules = None
+        elif new_rules and block_digest(text[slice(*span)]) == new_rules["sha256"]:
+            rules = new_rules
+    recovered = {"schema": 1, "files": owned, "rules": rules, "legacy_profiles": sorted(legacy)}
+    if owned or rules:
+        write_atomic(manifest, (json.dumps(recovered, indent=2, sort_keys=True) + "\n").encode())
+    else:
+        manifest.unlink(missing_ok=True)
+    journal.unlink()
+    print("recovered: ownership from interrupted operation; user files were not replayed")
 
 
 @dataclass
@@ -210,19 +290,36 @@ def execute(changes: list[Change], layout: Layout, dry_run: bool) -> None:
             write_atomic(change.path, change.data)
 
 
+def drops_custom_pins(path: Path, previous: bytes, expected: bytes) -> bool:
+    if path.suffix != ".toml":
+        return False
+    old_profile = tomllib.loads(previous.decode("utf-8-sig"))
+    new_profile = tomllib.loads(expected.decode("utf-8"))
+    return any(key in old_profile and old_profile[key] != new_profile.get(key)
+               for key in ("model", "model_reasoning_effort"))
+
+
 def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool = False,
              verify: bool = False, uninstall: bool = False) -> int:
-    desired = layout.desired(source)
+    desired = layout.removal_targets() if uninstall else layout.desired(source)
     manifest_path = layout.codex / f"{NAME}.manifest.json"
+    journal_path = layout.codex / f"{NAME}.transaction.json"
+    layout.check(manifest_path)
+    layout.check(journal_path)
+    if journal_path.exists():
+        if dry_run or verify:
+            print("pending interrupted operation: run install or uninstall to recover ownership")
+            return 1
+        recover_ownership(journal_path, manifest_path, layout, desired)
     manifest = load_manifest(manifest_path, layout, desired)
     owned = manifest["files"].copy()
-    rules_record = manifest.get("rules")
+    rules_record = dict(manifest["rules"]) if manifest.get("rules") else None
     guidance = layout.root / rules_record["path"] if uninstall and rules_record else active_guidance(layout)
     layout.check(guidance)
     text = read_text(guidance)
     span = bounds(text)
     expected_block = desired[layout.skill / "assets/routing.md"].decode("utf-8").rstrip("\n")
-    if bounds(expected_block) != (0, len(expected_block)):
+    if not uninstall and bounds(expected_block) != (0, len(expected_block)):
         raise ValueError("Invalid bundled routing block")
     present_block = text[slice(*span)] if span else None
     changes = []
@@ -263,6 +360,17 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
             print(f"unchanged: {path}")
             if managed:
                 owned[key] = digest(expected)
+        elif (existing is not None and managed and digest(existing) == owned[key]
+              and key not in manifest["legacy_profiles"] and drops_custom_pins(path, existing, expected)):
+            # Recovery must protect the original even if --force stops before
+            # its first backup. Only the replacement bytes can be owned again.
+            del manifest["files"][key]
+            owned.pop(key)
+            if force:
+                changes.append(Change(path, expected, "replace", backup=True))
+                owned[key] = digest(expected)
+            else:
+                issues.append(f"preserved user-pinned profile: {path}")
         elif existing is None or (managed and digest(existing) == owned[key]):
             changes.append(Change(path, expected, "create" if existing is None else "update"))
             owned[key] = digest(expected)
@@ -301,7 +409,7 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
     else:
         issues.append(f"skipped conflicting or customized routing block: {guidance}")
 
-    new_manifest = {"schema": 1, "files": owned, "rules": rules_record}
+    new_manifest = {"schema": 1, "files": owned, "rules": rules_record, "legacy_profiles": []}
     if owned or rules_record:
         data = (json.dumps(new_manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
         if not manifest_path.exists() or manifest_path.read_bytes() != data:
@@ -310,7 +418,15 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
         changes.append(Change(manifest_path, None, "remove manifest"))
     for issue in issues:
         print(issue)
+    if changes and not dry_run:
+        # Persist ownership intent before the first resource mutation. On retry,
+        # reconcile against observed bytes instead of claiming identical files
+        # that predated this operation or replaying stale content over edits.
+        journal = {"schema": 1, "before": manifest, "after": new_manifest}
+        write_atomic(journal_path, (json.dumps(journal, indent=2, sort_keys=True) + "\n").encode())
     execute(changes, layout, dry_run)
+    if changes and not dry_run:
+        journal_path.unlink()
     if not changes and not issues:
         print("no changes needed")
     return int(bool(issues))

@@ -1,5 +1,11 @@
 # Installation and maintenance
 
+## Skill-manager installation without global guidance
+
+Install with `npx skills add EthSign/sign-skills --skill codex-agent-ladder --agent codex --global --yes`. Skill discovery and the bundled role profiles support the explicit model-override path without installing native profiles or writing global AGENTS.md guidance. This mode requires a host exposing explicit spawn model and effort overrides. If automatic discovery does not select the skill, invoke `$codex-agent-ladder` explicitly. Do not run the Python installer for this mode. Leave unrelated global guidance unchanged; clearing it requires an explicit user request. Preserve and reconcile local customizations before skill-manager updates.
+
+## Alternative native-profile installation
+
 Requires Python 3.11+ (standard library only) and a Codex client with subagent support. Native profiles use the current standalone agent TOML format. Hosts exposing only model overrides can follow the fallback instructions in SKILL.md.
 
 Resolve `scripts/install.py` relative to this skill. On Windows, use an actual Python executable or `py -3`; a Microsoft Store stub is insufficient. Substitute the absolute script path in these commands:
@@ -42,9 +48,17 @@ Use `--force` only when the user authorizes replacing the named conflicting file
 
 ## Customize
 
-Change the model and reasoning values in a bundled `assets/subagents/ladder-*.toml`, then run the installer from that package. If you edit an installed profile directly, updates preserve it as a customization. Profiles with fixed model settings take precedence over per-spawn model overrides in the native custom-agent path; edit or select the appropriate profile for a different model.
+All four roles ship with model and reasoning effort unset. To pin either setting, add a top-level `model` or `model_reasoning_effort` field to the role’s TOML file. For example, adding only `model_reasoning_effort = "high"` to `ladder-verifier.toml` leaves model selection open. Choose values supported by your host. You can edit a native profile directly or customize a bundled profile before installing it.
 
-The shipped settings are starting points, not a claim of optimal cost or universally available models. Choose models your account can access and efforts those models support. The verifier has a separate context; it can use the same model family as the worker. For more demanding review, customize its model and effort rather than requiring the most expensive configuration for every change.
+On upgrade, the installer unpins profiles it can identify as exact copies from a release that shipped stock pins. If the manifest cannot establish which installer created a pinned profile, the upgrade preserves it for review. The installer preserves locally edited files and reports them for review. If a package update removes or changes an explicitly chosen pin from a customized bundle, the installer preserves the installed role file and reports the conflict. This includes pins that match former stock values. Use `--verify` to see which files differ from the package.
+
+Scout and verifier roles avoid source edits by instruction. Native and fallback workers inherit parent permissions; `sandbox_mode` and `approval_policy` in a custom-agent profile do not create a separate permission boundary. The installer rejects these misleading profile fields. Configure enforcement on the parent session.
+
+## Interrupted operations
+
+The installer writes a validated `codex-agent-ladder.transaction.json` ownership journal before changing resources. After an interruption, rerun install or uninstall to reconcile ownership against the bytes actually present. If the installed script itself has been removed, run the command from an intact copy of this package with the same target. Uninstall does not require intact bundled resources. Recovery never replays resource writes over later edits. Files customized after interruption remain protected, and identical files that predated installation remain unowned. Run maintenance serially for a given target.
+
+`--dry-run` and `--verify` report a pending journal without changing it. After recovery, normal conflict handling applies. Do not delete a pending journal to suppress the warning: it may be the only ownership record for a partial installation.
 
 ## Remove
 
@@ -53,7 +67,7 @@ python /path/to/codex-agent-ladder/scripts/install.py --uninstall --dry-run
 python /path/to/codex-agent-ladder/scripts/install.py --uninstall
 ```
 
-Removal deletes only manifest-owned files whose hashes still match and removes the unedited managed routing block. Customized files, edited routing blocks, and backups remain. When customizations remain, the manifest retains their ownership records so later maintenance can identify them. Empty directories may remain. Use the same `--project` or `--codex-dir` target used at installation.
+Removal deletes only manifest-owned files whose hashes still match and removes the unedited managed routing block. Customized files, edited routing blocks, and backups remain. The manifest retains the previous hashes of locally edited managed files. When an upgrade preserves a conflicting pin installed from a customized bundle, it releases ownership of that file. Empty directories may remain. Use the same `--project` or `--codex-dir` target used at installation.
 
 ## Validation and performance
 
@@ -65,7 +79,7 @@ python -m unittest discover -s /path/to/codex-agent-ladder/tests -v
 
 Runtime verification is a separate model-consuming task. When requested, delegate a small read-only fixture using each available role and inspect runtime-reported model metadata when exposed. Self-reported model names are not proof of routing. Evaluate real work against an ordinary Codex baseline using elapsed time, recorded usage, escalations, and defects; static installation tests cannot establish savings.
 
-Configuration references, checked September 29, 2026:
+Configuration references, checked October 26, 2026:
 
 - [Custom Codex agents and model selection](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents)
 - [Skill authoring and discovery](https://learn.chatgpt.com/docs/build-skills)

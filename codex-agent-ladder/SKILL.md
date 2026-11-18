@@ -5,50 +5,61 @@ description: Automatically route substantial implementation, debugging, codebase
 
 # Codex Agent Ladder
 
-Apply the ladder automatically to work within its description; no separate delegation request is needed. Use four roles at an appropriate level of capability. Select by task difficulty and consequence; keep quick, dependent steps in the main agent. These skill instructions request delegation within the user's task, subject to the host's permissions and available tools.
+Apply this routing policy automatically to work within its description; no separate delegation request is needed. Zero workers is a normal outcome, including for substantial but tightly coupled work when delegation would cost more than it helps. The four profiles are optional entry points, not stages every task must traverse. These skill instructions request beneficial delegation within the user's task, subject to the host's permissions and available tools.
 
 ## Route work
 
-| Role | Preset | Delegate when |
-| --- | --- | --- |
-| `ladder_scout` | `gpt-6-luna`, high | A bounded, read-only investigation can return useful evidence without filling the main context with search output. |
-| `ladder_worker` | `gpt-6.1-sol`, medium | Implementation has a clear goal, established patterns, and a bounded set of owned files. |
-| `ladder_deep_worker` | `gpt-6-astra`, high | Root cause, design, or migration decisions need substantial judgment. |
-| `ladder_verifier` | `gpt-6.1-sol`, high | A consequential or complex result benefits from a separate review of its actual behavior. |
+| Role | Delegate when |
+| --- | --- |
+| `ladder_scout` | A bounded, read-only investigation can return useful evidence without filling the main context with search output. |
+| `ladder_worker` | Implementation has a clear goal, established patterns, and a bounded set of owned files. |
+| `ladder_deep_worker` | Root cause, design, or migration decisions need substantial judgment. |
+| `ladder_verifier` | A consequential or complex result benefits from a separate review of its actual behavior. |
 
-The installed TOML profiles are authoritative; the table describes shipped presets. Model access varies by host and account. Read only the profile needed for the current delegation.
+The four named roles define the assignment and its instructions. Choose the model and reasoning effort separately for each task. Optimize usage allowance per correctly completed task, including coordination, verification, and retries. Preserve correctness and complete the authorized scope. Read only the profile needed for the current delegation.
+
+Choose from the models exposed by the worker selector. Consider `gpt-6.2-sol` for everyday implementation, test fixes, and PR review. Consider `gpt-6.2-astra` when a diagnosis spans services, evidence conflicts, or a design decision needs deeper reasoning. A focused, repeatable extraction job can still suit `gpt-6-luna` where available. Select by the expected usage for a correct result, including rework. [GPT-6.2 in Codex](https://learn.chatgpt.com/docs/whats-new/gpt-62-astra-sol)
+
+For a 6.2 parent, start by considering its model and reasoning effort for the child. Lower effort for a quick scan, raise it for a harder investigation, or select a different available model when the assignment warrants it. Honor any exact model or named-profile requirement. [Codex subagent guidance](https://learn.chatgpt.com/docs/agent-configuration/subagents#choosing-models-and-reasoning)
+
+Consider GPT-6.1 Terra for bounded visual reasoning (screenshots, UI evidence, or technical drawings), supported computer-use tasks, clear drafting/revision, and scoped code fixes. Start at medium effort when it fits the assignment, then adjust from observed quality and total usage. See [current model selection](https://learn.chatgpt.com/docs/model-selection) and the [Terra model reference](https://developers.openai.com/api/docs/models/gpt-6.1-terra). API-supported effort values do not establish what the current Codex spawn tool accepts; select only values exposed by the host. API token prices are not direct subscription-allowance conversion rates.
+
+Sol, Terra, Luna, and Astra workers are authorized when justified, without a separate exception. Workers may use higher effort than the parent, including Astra/high under Astra/low. Use low for straightforward extraction, medium for exploration, and high for complex logic or substantial uncertainty; higher supported efforts are appropriate when their expected benefit justifies the usage. Keep the main agent's selected model and effort unchanged. If asked to recommend a main model, use the same selection criteria.
 
 - Plan and integrate in the main agent. Delegate independent investigations or implementation slices when the benefit exceeds startup and coordination costs. A one-command lookup or formatting change usually stays in the main agent.
-- Start obviously difficult work at the deep tier. For ordinary implementation, start at the worker tier. A command or test runner does not need a separate model merely to execute it.
+- Start difficult delegated work at an appropriate capability level rather than first paying for a weaker attempt. A command or test runner does not need a separate model merely to execute it.
 - Launch independent tasks together within the runtime's existing concurrency limit. Give concurrent writers disjoint file ownership, or separate worktrees when justified. Integrate changes before reviewing the combined result.
-- Use a separate verifier context for complex or consequential changes, unresolved disagreements, or requested reviews. For a small routine change, the main agent's appropriate checks may suffice. Reviewer evidence and tests matter more than model identity.
+- Start with up to two workers; add more when each has a distinct, bounded assignment and the time or quality benefit justifies the usage. While workers run, advance separate work in the main agent. Keep dependent steps sequential, avoid duplicate exploration, and do not create work merely to occupy agents.
+- Use a separate verifier context for complex or consequential changes, unresolved disagreements, or requested independent reviews. For a small routine change, the main agent's appropriate checks may suffice. Assign verification ownership: workers perform focused checks, verifiers investigate risks or gaps, and the parent validates integration and resolves disagreements. Reuse evidence from the same snapshot; repeat checks only for a concrete reason. Reviewer evidence and tests matter more than model identity.
 - Keep delegation one level deep: the main agent coordinates; these four roles return results without spawning children. This is a workflow convention, not a change to runtime settings.
 
 ## Spawn a role
 
 Prefer the host's native custom-agent selector when it is exposed. Personal profiles are in `<codex-home>/agents/ladder-*.toml`; project profiles are in `<project>/.codex/agents/`. Resolve Codex home from `CODEX_HOME`, then the user's `.codex` directory. Respect the host's configuration precedence.
 
-If the spawn tool exposes model and reasoning overrides but no custom-agent selector, read the installed profile, or its corresponding [bundled profile](assets/subagents/) if uninstalled. Pass its `model` and `model_reasoning_effort` explicitly and include its `developer_instructions` in the delegated task. Use a fresh context with only necessary facts. If a history-fork option exists, choose the option compatible with explicit overrides; do not fork full history when that prevents model selection.
+The shipped profiles leave both model and reasoning effort open. Honor each field the user pins in a selected role, including when using its instructions through the fallback path. Select the remaining settings for the assignment and pass them explicitly when the host supports it. If native role selection is unavailable, use the relevant installed profile or [bundled role instructions](assets/subagents/) with the host’s spawn tool. If an exact request conflicts with a pin on a required role, surface the conflict. Use a fresh context with only necessary facts. If a history-fork option exists, choose the option compatible with explicit overrides; do not fork full history when that prevents model selection. Do not silently rewrite persistent profiles to make a one-off choice.
 
-If the host cannot select a model, use an available inherited model and report that limitation when it affects the routing decision. Never claim a model was selected from the agent's self-description. Honor runtime overrides: read-only profile defaults may be replaced by the parent's live permissions. A read-only assignment still prohibits edits by instruction; it is not an additional sandbox guarantee in the fallback path.
+If an autonomously chosen model is unavailable, disclose the substitution and select another available model using the same criteria, or continue locally when practical. Preserve explicit user model and named-agent requirements; do not silently substitute for them. If the host cannot select a model, report that limitation and use an inherited model only when compatible with those requirements and justified by the expected benefit. Never claim a model was selected from the agent's self-description. In both native and fallback paths, workers inherit the parent's sandbox and approval settings. Read-only roles prohibit edits by instruction; custom-agent profiles cannot establish a separate read-only sandbox.
 
 Give each delegated task:
 
 - The concrete outcome, relevant context, and acceptance criteria.
 - Its scope and file ownership, existing user constraints, and appropriate validation.
-- The expected response: evidence or changed files, checks performed and their results, and unresolved issues.
+- For repository work, the absolute worktree, base/head revision, relevant uncommitted diff or snapshot, and which integrated state must be reviewed. Include prior evidence, attempted approaches, completed checks and active command handles when relevant. State the remaining decision so a replacement worker can continue without rediscovery. Revalidate affected conclusions when the reviewed snapshot changes.
+- A concise response with evidence or changed files, file/line references or source links, checks and actual results, and explicit uncertainties. Keep prompts, tool output, and reports focused on relevant evidence.
 
 ## Escalate and finish
 
 Scouts and workers return `DONE`, `ESCALATE`, or `BLOCKED` with evidence. The verifier returns `PASS`, `FAIL`, or `UNCERTAIN`. Treat a reported success as a claim to validate.
 
-- Escalate an incomplete scout investigation to the main agent or deep worker when judgment is needed. Escalate failed or uncertain worker implementation to the deep worker with the prior evidence and attempted checks.
-- Allow one escalation per work item by default. If the deeper attempt still cannot satisfy the criteria, integrate what is useful and explain the remaining blocker or request the missing information. Do not repeat equivalent attempts.
-- Missing permissions, credentials, dependencies outside the authorized scope, or an unavailable model are operational blockers. Diagnose them; greater reasoning effort does not grant access. Do not bypass permissions or silently substitute an unavailable model.
+- Classify failures before escalating. An understood implementation or test failure normally gets a bounded repair by the same worker. Escalate unresolved reasoning or design uncertainty to the main agent or a suitably capable worker with the prior evidence and attempted checks. A failed command alone does not justify a more expensive model.
+- Allow one capability escalation per work item by default. After an unsuccessful repair or escalation, reassess the cause and remaining evidence rather than repeat equivalent attempts. Continue useful work when a new approach is supported; request input only for a specific missing decision or prerequisite. Do not treat the escalation budget as permission to abandon authorized scope.
+- Missing permissions, credentials, or dependencies outside the authorized scope are operational blockers. Diagnose them; greater reasoning effort does not grant access. Handle unavailable models according to the selection and disclosure rules above.
 - Track each long-running command by its runtime session or process handle and wait on that same execution. Do not launch duplicate tests or builds because output is delayed. Use the host's supported wait tools.
+- Use completion notifications or bounded waits rather than frequent polling. Verify consequential findings against sources or focused checks without repeating all supporting work. Complete required project checks; broaden or repeat checks only when changes, failures, or unresolved concerns justify it.
 - Inspect the integrated result and complete checks appropriate to the change. A verifier verdict does not authorize merging, deployment, publication, or messages to others.
-- When comparing ladder performance, record observed elapsed time, escalations, checks, and runtime-reported model and usage metadata when available. Do not invent token counts, dollar savings, or quota equivalences. This skill provides routing conventions, not a hard spending limit.
+- When tuning routing, compare representative task classes against direct execution with equivalent acceptance criteria. Record route, outcome, rework, elapsed time, and runtime-reported usage when available; avoid adding a separate reporting task to ordinary work. Adjust routing guidance using observed outcomes. Do not invent token counts, dollar savings, or quota equivalences. This skill provides routing conventions, not a hard spending limit.
 
 ## Manage the installation
 
-For installation, updates, static verification, customization, or removal, read [installation.md](references/installation.md) and use `scripts/install.py`. Management requests do not require spawning subagents. The installer manages this skill's files, four profiles, its manifest, and a marked routing block in the active AGENTS.md guidance. It preserves unrelated instructions.
+For installation, updates, static verification, customization, or removal, read [installation.md](references/installation.md). Management requests do not require spawning subagents. Support both skill-manager installation with bundled-profile fallback and the separate Python installer for native profiles and a managed global routing block. Honor the user's chosen installation mode: when they request skill-only guidance, do not run the Python installer or add global routing instructions. Skill-manager updates may replace local customizations; preserve and reconcile them when updating. Explicit task instructions and required project workflows take precedence over these defaults.
