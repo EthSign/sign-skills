@@ -20,13 +20,19 @@ NAME = "codex-agent-ladder"
 BEGIN = f"<!-- {NAME}:begin -->"
 END = f"<!-- {NAME}:end -->"
 PROFILES = ("ladder-scout", "ladder-worker", "ladder-deep-worker", "ladder-verifier")
-# Used only to distinguish the former distribution defaults from pins installed
-# from a user-customized bundle during migration to unpinned roles.
-LEGACY_PINS = {
-    "ladder-scout": ("gpt-6-luna", "high"),
-    "ladder-worker": ("gpt-6.1-sol", "medium"),
-    "ladder-deep-worker": ("gpt-6-astra", "high"),
-    "ladder-verifier": ("gpt-6.1-sol", "high"),
+# SHA-256 of the normalized files shipped before roles became unpinned.
+LEGACY_INSTALLERS = {
+    "859e233d88c561482159a1573605f7d57ca3711df50a5df45b19b909cdbc1c54",  # 1132d1d
+    "d3ac30697cc0e6a6ed31bfa7fe9d592a889b106a7687b12cdaf41f453dbb9185",  # 958dcc9
+    "ae6a27b3a3e645c4d80f4563d9370b539c3379a690888457531a2af442679f91",  # f9b0a68
+}
+LEGACY_ROLES = {
+    "4a9609f0c7762ec228a116fb3494736e3714a07250b8ef254821853bce1d7e23",  # ladder-deep-worker at 1132d1d
+    "e94631539aa7245f2e86686b23e0242ab5206f130a88217bbb067617ef2747bd",  # ladder-scout at 1132d1d
+    "619b59160c4c97eea2df1fd99c9836eb18e26251316be02640b69458d3b9587b",  # ladder-scout at 958dcc9
+    "df66f198023c7682c17a70de8fb8a558b868b33010f66c86f2551cb1613de198",  # ladder-verifier at 1132d1d
+    "763e0a31ae465f6d5d50bae8489089f4e7d54cb2ad46fd7d0f00b16589734f39",  # ladder-verifier at 958dcc9
+    "173bc98000024ae77f4ad98efa1932569f6c26a275211113258d0e54579c0cb5",  # ladder-worker at 1132d1d
 }
 RESOURCES = (
     "SKILL.md", "agents/openai.yaml", "references/installation.md",
@@ -172,7 +178,7 @@ def active_guidance(layout: Layout) -> Path:
 def load_manifest(path: Path, layout: Layout, desired: dict[Path, bytes]) -> dict:
     layout.check(path)
     if not path.exists():
-        return {"schema": 1, "files": {}, "rules": None}
+        return {"schema": 1, "files": {}, "rules": None, "legacy_profiles": []}
     return validate_manifest(json.loads(read_text(path).lstrip("\ufeff")), layout, desired)
 
 
@@ -185,6 +191,19 @@ def validate_manifest(record: dict, layout: Layout, desired: dict[Path, bytes]) 
         if key not in allowed or not valid_hash(value):
             raise ValueError(f"Invalid manifest entry: {key}")
         layout.check(layout.root / key)
+    # A legacy installer owned released profile bytes. A newer installer may
+    # have installed those exact bytes from an explicitly pinned source bundle.
+    legacy = record.get("legacy_profiles")
+    if "legacy_profiles" not in record:
+        script = layout.skill / "scripts/install.py"
+        installer_hash = record["files"].get(layout.key(script))
+        record["legacy_profiles"] = [
+            key for key, checksum in record["files"].items()
+            if installer_hash in LEGACY_INSTALLERS and checksum in LEGACY_ROLES
+        ]
+    elif (not isinstance(legacy, list) or
+          any(not isinstance(key, str) or record["files"].get(key) not in LEGACY_ROLES for key in legacy)):
+        raise ValueError("Invalid legacy profile entry")
     rules = record.get("rules")
     if rules is not None:
         allowed_rules = {layout.key(layout.guidance / name) for name in ("AGENTS.md", "AGENTS.override.md")}
@@ -203,17 +222,18 @@ def recover_ownership(journal: Path, manifest: Path, layout: Layout,
     before = validate_manifest(record.get("before"), layout, desired)
     after = validate_manifest(record.get("after"), layout, desired)
     owned = {}
+    legacy = []
     for key in before["files"].keys() | after["files"].keys():
         path = layout.root / key
         if not path.exists():
             continue
         current = digest(path.read_bytes())
-        if current == after["files"].get(key):
-            owned[key] = current
-        else:
-            # Keep the last known hash for an incomplete update or a subsequent
-            # customization. Removal will preserve bytes that no longer match.
-            owned[key] = before["files"].get(key, after["files"].get(key))
+        # Keep the previous owner for incomplete updates. Subsequent edits stay
+        # protected because their bytes differ from the recorded ownership hash.
+        owner = after if current == after["files"].get(key) or key not in before["files"] else before
+        owned[key] = owner["files"][key]
+        if key in owner["legacy_profiles"]:
+            legacy.append(key)
     old_rules, new_rules = before.get("rules"), after.get("rules")
     rules = old_rules or new_rules
     if rules:
@@ -223,7 +243,7 @@ def recover_ownership(journal: Path, manifest: Path, layout: Layout,
             rules = None
         elif new_rules and block_digest(text[slice(*span)]) == new_rules["sha256"]:
             rules = new_rules
-    recovered = {"schema": 1, "files": owned, "rules": rules}
+    recovered = {"schema": 1, "files": owned, "rules": rules, "legacy_profiles": sorted(legacy)}
     if owned or rules:
         write_atomic(manifest, (json.dumps(recovered, indent=2, sort_keys=True) + "\n").encode())
     else:
@@ -271,15 +291,12 @@ def execute(changes: list[Change], layout: Layout, dry_run: bool) -> None:
 
 
 def drops_custom_pins(path: Path, previous: bytes, expected: bytes) -> bool:
-    if path.suffix != ".toml" or path.stem not in LEGACY_PINS:
-        return False
-    keys = ("model", "model_reasoning_effort")
-    new_profile = tomllib.loads(expected.decode("utf-8"))
-    if any(key in new_profile for key in keys):
+    if path.suffix != ".toml":
         return False
     old_profile = tomllib.loads(previous.decode("utf-8-sig"))
-    return (any(key in old_profile for key in keys)
-            and tuple(old_profile.get(key) for key in keys) != LEGACY_PINS[path.stem])
+    new_profile = tomllib.loads(expected.decode("utf-8"))
+    return any(key in old_profile and old_profile[key] != new_profile.get(key)
+               for key in ("model", "model_reasoning_effort"))
 
 
 def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool = False,
@@ -344,15 +361,15 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
             if managed:
                 owned[key] = digest(expected)
         elif (existing is not None and managed and digest(existing) == owned[key]
-              and drops_custom_pins(path, existing, expected)):
+              and key not in manifest["legacy_profiles"] and drops_custom_pins(path, existing, expected)):
+            # Recovery must protect the original even if --force stops before
+            # its first backup. Only the replacement bytes can be owned again.
+            del manifest["files"][key]
+            owned.pop(key)
             if force:
                 changes.append(Change(path, expected, "replace", backup=True))
                 owned[key] = digest(expected)
             else:
-                # Relinquish ownership in both journal snapshots. Recovery must
-                # also preserve these bytes if uninstall follows an interruption.
-                del manifest["files"][key]
-                owned.pop(key)
                 issues.append(f"preserved user-pinned profile: {path}")
         elif existing is None or (managed and digest(existing) == owned[key]):
             changes.append(Change(path, expected, "create" if existing is None else "update"))
@@ -392,7 +409,7 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
     else:
         issues.append(f"skipped conflicting or customized routing block: {guidance}")
 
-    new_manifest = {"schema": 1, "files": owned, "rules": rules_record}
+    new_manifest = {"schema": 1, "files": owned, "rules": rules_record, "legacy_profiles": []}
     if owned or rules_record:
         data = (json.dumps(new_manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
         if not manifest_path.exists() or manifest_path.read_bytes() != data:

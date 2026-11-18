@@ -50,7 +50,7 @@ Use `--force` only when the user authorizes replacing the named conflicting file
 
 All four roles ship with model and reasoning effort unset. To pin either setting, add a top-level `model` or `model_reasoning_effort` field to the role’s TOML file. For example, adding only `model_reasoning_effort = "high"` to `ladder-verifier.toml` leaves model selection open. Choose values supported by your host. You can edit a native profile directly or customize a bundled profile before installing it.
 
-On upgrade, unchanged profiles with the former stock settings become unpinned. The installer preserves locally edited files and reports them for review. It also preserves nonstock pins previously installed from a customized bundle when the new package leaves both settings unset. Use `--verify` to see which files differ from the package.
+On upgrade, the installer unpins profiles it can identify as exact copies from a release that shipped stock pins. If the manifest cannot establish which installer created a pinned profile, the upgrade preserves it for review. The installer preserves locally edited files and reports them for review. If a package update removes or changes an explicitly chosen pin from a customized bundle, the installer preserves the installed role file and reports the conflict. This includes pins that match former stock values. Use `--verify` to see which files differ from the package.
 
 Scout and verifier roles avoid source edits by instruction. Native and fallback workers inherit parent permissions; `sandbox_mode` and `approval_policy` in a custom-agent profile do not create a separate permission boundary. The installer rejects these misleading profile fields. Configure enforcement on the parent session.
 
@@ -67,7 +67,7 @@ python /path/to/codex-agent-ladder/scripts/install.py --uninstall --dry-run
 python /path/to/codex-agent-ladder/scripts/install.py --uninstall
 ```
 
-Removal deletes only manifest-owned files whose hashes still match and removes the unedited managed routing block. Customized files, edited routing blocks, and backups remain. When customizations remain, the manifest retains their ownership records so later maintenance can identify them. Empty directories may remain. Use the same `--project` or `--codex-dir` target used at installation.
+Removal deletes only manifest-owned files whose hashes still match and removes the unedited managed routing block. Customized files, edited routing blocks, and backups remain. The manifest retains the previous hashes of locally edited managed files. When an upgrade preserves a conflicting pin installed from a customized bundle, it releases ownership of that file. Empty directories may remain. Use the same `--project` or `--codex-dir` target used at installation.
 
 ## Validation and performance
 

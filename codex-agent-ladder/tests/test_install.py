@@ -140,8 +140,17 @@ class InstallationTests(unittest.TestCase):
         for name, (model, effort) in former_defaults.items():
             path = profiles / f"{name}.toml"
             pins = f'model = "{model}"\nmodel_reasoning_effort = "{effort}"\n'
-            path.write_text(pins + path.read_text())
+            path.write_text(path.read_text().replace("developer_instructions =", pins + "developer_instructions ="))
         self.assertEqual(self.run_install(), 0)
+        # Recreate the schema-1 ownership record written by cc60ae3. The old
+        # installer recorded its own normalized digest and the exact role bytes.
+        manifest = self.manifest()
+        del manifest["legacy_profiles"]
+        script_key = self.layout.key(self.layout.skill / "scripts/install.py")
+        manifest["files"][script_key] = "ae6a27b3a3e645c4d80f4563d9370b539c3379a690888457531a2af442679f91"
+        manifest_path = self.target / f"{installer.NAME}.manifest.json"
+        manifest_path.write_text(json.dumps(manifest))
+        (self.layout.skill / "scripts/install.py").unlink()
         custom = self.worker().read_bytes().replace(b"gpt-6.1-sol", b"user-model").replace(b"medium", b"high")
         self.worker().write_bytes(custom)
         for path in profiles.glob("*.toml"):
@@ -180,6 +189,72 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.run_install(uninstall=True), 0)
         for installed, original in saved.items():
             self.assertEqual(installed.read_bytes(), original)
+
+    def test_explicit_former_defaults_survive_a_stock_upgrade(self):
+        path = self.source / "assets/subagents/ladder-worker.toml"
+        role = path.read_text()
+        pins = 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n'
+        path.write_text(role.replace("developer_instructions =", pins + "developer_instructions ="))
+        self.assertEqual(self.run_install(), 0)
+        original = self.worker().read_bytes()
+        self.assertIn(installer.digest(original), installer.LEGACY_ROLES)
+        # An install made by the first unpinned release had no migration field.
+        manifest = self.manifest()
+        del manifest["legacy_profiles"]
+        (self.target / f"{installer.NAME}.manifest.json").write_text(json.dumps(manifest))
+        path.write_text(role)
+        self.assertEqual(self.run_install(), 1)
+        self.assertEqual(self.run_install(uninstall=True), 0)
+        self.assertEqual(self.worker().read_bytes(), original)
+        self.assertEqual((self.layout.skill / "assets/subagents" / path.name).read_bytes(), original)
+
+    def test_unowned_installer_cannot_identify_an_explicit_pin_as_stock(self):
+        path = self.source / "assets/subagents/ladder-worker.toml"
+        role = path.read_text()
+        pins = 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n'
+        path.write_text(role.replace("developer_instructions =", pins + "developer_instructions ="))
+        unowned = self.layout.skill / "scripts/install.py"
+        unowned.parent.mkdir(parents=True)
+        unowned.write_bytes(b"# Unowned installer from an older package.\n")
+        self.assertEqual(self.run_install(), 1)
+        original = self.worker().read_bytes()
+        manifest = self.manifest()
+        self.assertNotIn(self.layout.key(unowned), manifest["files"])
+        del manifest["legacy_profiles"]
+        (self.target / f"{installer.NAME}.manifest.json").write_text(json.dumps(manifest))
+        path.write_text(role)
+        with mock.patch.object(installer, "LEGACY_INSTALLERS", {installer.digest(unowned.read_bytes())}):
+            self.assertEqual(self.run_install(), 1)
+        self.assertEqual(self.worker().read_bytes(), original)
+        self.assertEqual((self.layout.skill / "assets/subagents" / path.name).read_bytes(), original)
+
+    def test_effort_only_update_preserves_existing_model_pin(self):
+        path = self.source / "assets/subagents/ladder-worker.toml"
+        role = path.read_text()
+        path.write_text('model = "my-model"\n' + role)
+        self.assertEqual(self.run_install(), 0)
+        original = self.worker().read_bytes()
+        path.write_text('model_reasoning_effort = "high"\n' + role)
+        self.assertEqual(self.run_install(), 1)
+        self.assertEqual(self.worker().read_bytes(), original)
+        self.assertEqual(self.run_install(force=True), 0)
+        self.assertEqual(self.worker().read_text(), path.read_text())
+        backup, = self.worker().parent.glob("ladder-worker.toml.*.bak")
+        self.assertEqual(backup.read_bytes(), original)
+
+    def test_force_interruption_before_backup_keeps_original_pins_on_uninstall(self):
+        path = self.source / "assets/subagents/ladder-worker.toml"
+        role = path.read_bytes()
+        path.write_bytes(b'model = "my-model"\n' + role)
+        self.assertEqual(self.run_install(), 0)
+        original = self.worker().read_bytes()
+        path.write_bytes(role)
+        with mock.patch.object(installer, "execute", side_effect=OSError("before backup")):
+            with self.assertRaisesRegex(OSError, "before backup"):
+                self.run_install(force=True)
+        self.assertEqual(self.run_install(uninstall=True), 1)
+        self.assertEqual(self.worker().read_bytes(), original)
+        self.assertEqual((self.layout.skill / "assets/subagents" / path.name).read_bytes(), original)
 
     def test_invalid_optional_pins_rejected_before_writes(self):
         path = self.source / "assets/subagents/ladder-worker.toml"
