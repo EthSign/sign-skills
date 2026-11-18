@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -50,7 +51,14 @@ class InstallationTests(unittest.TestCase):
 
     def test_install_verify_and_idempotency(self):
         self.assertEqual(self.run_install(), 0)
-        self.assertEqual(len(list((self.target / "agents").glob("*.toml"))), 4)
+        roles = {}
+        for path in (self.target / "agents").glob("*.toml"):
+            profile = tomllib.loads(path.read_text())
+            roles[profile["name"]] = path.stem
+            self.assertNotIn("model", profile)
+            self.assertNotIn("model_reasoning_effort", profile)
+        self.assertEqual(roles, {name.replace("-", "_"): name for name in
+                                 ("ladder-scout", "ladder-worker", "ladder-deep-worker", "ladder-verifier")})
         self.assertIn(installer.BEGIN, (self.target / "AGENTS.md").read_text())
         before = self.files()
         times = {p: p.stat().st_mtime_ns for p in self.target.rglob("*") if p.is_file()}
@@ -121,10 +129,73 @@ class InstallationTests(unittest.TestCase):
         self.assertIn("agents/ladder-worker.toml", self.manifest()["files"])
         self.assertNotIn(installer.BEGIN, (self.target / "AGENTS.md").read_text())
 
+    def test_upgrade_unpins_stock_roles_and_preserves_locally_edited_pins(self):
+        former_defaults = {
+            "ladder-scout": ("gpt-6-luna", "high"),
+            "ladder-worker": ("gpt-6.1-sol", "medium"),
+            "ladder-deep-worker": ("gpt-6-astra", "high"),
+            "ladder-verifier": ("gpt-6.1-sol", "high"),
+        }
+        profiles = self.source / "assets/subagents"
+        for name, (model, effort) in former_defaults.items():
+            path = profiles / f"{name}.toml"
+            pins = f'model = "{model}"\nmodel_reasoning_effort = "{effort}"\n'
+            path.write_text(pins + path.read_text())
+        self.assertEqual(self.run_install(), 0)
+        custom = self.worker().read_bytes().replace(b"gpt-6.1-sol", b"user-model").replace(b"medium", b"high")
+        self.worker().write_bytes(custom)
+        for path in profiles.glob("*.toml"):
+            path.write_bytes((PACKAGE / "assets/subagents" / path.name).read_bytes())
+
+        self.assertEqual(self.run_install(), 1)
+        for path in (self.target / "agents").glob("*.toml"):
+            if path == self.worker():
+                self.assertEqual(path.read_bytes(), custom)
+            else:
+                self.assertEqual(path.read_text(), (profiles / path.name).read_text())
+        self.assertEqual(self.run_install(), 1)
+        self.assertEqual(self.run_install(uninstall=True), 1)
+        self.assertEqual(self.worker().read_bytes(), custom)
+
+    def test_pins_from_custom_bundles_survive_interrupted_upgrade_and_uninstall(self):
+        profiles = self.source / "assets/subagents"
+        for name, pins in {
+            "ladder-scout": 'model = "custom-model"',
+            "ladder-worker": 'model_reasoning_effort = "high"',
+            "ladder-verifier": 'model = "custom-model"\nmodel_reasoning_effort = "low"',
+        }.items():
+            path = profiles / f"{name}.toml"
+            path.write_text(pins + "\n" + path.read_text())
+        self.assertEqual(self.run_install(), 0)
+        saved = {}
+        for path in profiles.glob("*.toml"):
+            if path.stem == "ladder-deep-worker":
+                continue
+            for installed in (self.layout.skill / "assets/subagents", self.target / "agents"):
+                saved[installed / path.name] = (installed / path.name).read_bytes()
+            path.write_bytes((PACKAGE / "assets/subagents" / path.name).read_bytes())
+
+        self.assertEqual(self.run_install(dry_run=True), 1)
+        self.interrupt_after(lambda change: change.action == "record ownership")
+        self.assertEqual(self.run_install(uninstall=True), 0)
+        for installed, original in saved.items():
+            self.assertEqual(installed.read_bytes(), original)
+
+    def test_invalid_optional_pins_rejected_before_writes(self):
+        path = self.source / "assets/subagents/ladder-worker.toml"
+        role = path.read_text()
+        for pin in ('model = " "', 'model = []', 'model_reasoning_effort = []',
+                    'model_reasoning_effort = "unknown"'):
+            with self.subTest(pin=pin):
+                path.write_text(pin + "\n" + role)
+                with self.assertRaisesRegex(ValueError, "Invalid"):
+                    self.run_install()
+                self.assertFalse(self.target.exists())
+
     def test_source_update_replaces_unmodified_owned_file(self):
         self.run_install()
         profile = self.source / "assets/subagents/ladder-worker.toml"
-        profile.write_text(profile.read_text().replace('"medium"', '"high"'))
+        profile.write_text('model_reasoning_effort = "high"\n' + profile.read_text())
         self.assertEqual(self.run_install(), 0)
         self.assertIn('model_reasoning_effort = "high"', self.worker().read_text())
         self.assertEqual(self.run_install(verify=True), 0)
@@ -242,7 +313,7 @@ class InstallationTests(unittest.TestCase):
     def test_interrupted_update_recovers_new_hash_and_routing(self):
         self.assertEqual(self.run_install(), 0)
         profile = self.source / "assets/subagents/ladder-worker.toml"
-        profile.write_text(profile.read_text().replace('"medium"', '"high"'))
+        profile.write_text('model_reasoning_effort = "high"\n' + profile.read_text())
         routing = self.source / "assets/routing.md"
         routing.write_text(routing.read_text().replace("Keep quick", "Keep small"))
         self.interrupt_after(lambda change: change.path == self.target / "AGENTS.md")

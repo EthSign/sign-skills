@@ -48,9 +48,9 @@ Use `--force` only when the user authorizes replacing the named conflicting file
 
 ## Customize
 
-Change the model and reasoning values in a bundled `assets/subagents/ladder-*.toml`, then run the installer from that package. If you edit an installed profile directly, updates preserve it as a customization. Profiles with fixed model settings take precedence over per-spawn model overrides in the native custom-agent path; edit or select the appropriate profile for a different model.
+All four roles ship with model and reasoning effort unset. To pin either setting, add a top-level `model` or `model_reasoning_effort` field to the role’s TOML file. For example, adding only `model_reasoning_effort = "high"` to `ladder-verifier.toml` leaves model selection open. Choose values supported by your host. You can edit a native profile directly or customize a bundled profile before installing it.
 
-The shipped settings are starting points, not a claim of optimal cost or universally available models. Choose models your account can access and efforts those models support. The verifier has a separate context; it can use the same model family as the worker. For more demanding review, customize its model and effort rather than requiring the most expensive configuration for every change.
+On upgrade, unchanged profiles with the former stock settings become unpinned. The installer preserves locally edited files and reports them for review. It also preserves nonstock pins previously installed from a customized bundle when the new package leaves both settings unset. Use `--verify` to see which files differ from the package.
 
 Scout and verifier roles avoid source edits by instruction. Native and fallback workers inherit parent permissions; `sandbox_mode` and `approval_policy` in a custom-agent profile do not create a separate permission boundary. The installer rejects these misleading profile fields. Configure enforcement on the parent session.
 

@@ -20,6 +20,14 @@ NAME = "codex-agent-ladder"
 BEGIN = f"<!-- {NAME}:begin -->"
 END = f"<!-- {NAME}:end -->"
 PROFILES = ("ladder-scout", "ladder-worker", "ladder-deep-worker", "ladder-verifier")
+# Used only to distinguish the former distribution defaults from pins installed
+# from a user-customized bundle during migration to unpinned roles.
+LEGACY_PINS = {
+    "ladder-scout": ("gpt-6-luna", "high"),
+    "ladder-worker": ("gpt-6.1-sol", "medium"),
+    "ladder-deep-worker": ("gpt-6-astra", "high"),
+    "ladder-verifier": ("gpt-6.1-sol", "high"),
+}
 RESOURCES = (
     "SKILL.md", "agents/openai.yaml", "references/installation.md",
     "scripts/install.py", "assets/routing.md",
@@ -95,10 +103,14 @@ class Layout:
             profile = tomllib.loads(data.decode("utf-8"))
             if profile.get("name") != name.replace("-", "_"):
                 raise ValueError(f"Invalid profile name: {name}")
-            for key in ("description", "model", "developer_instructions"):
+            for key in ("description", "developer_instructions"):
                 if not isinstance(profile.get(key), str) or not profile[key].strip():
                     raise ValueError(f"Missing {key} in {name}")
-            if profile.get("model_reasoning_effort") not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+            if "model" in profile and (not isinstance(profile["model"], str) or not profile["model"].strip()):
+                raise ValueError(f"Invalid model in {name}")
+            if "model_reasoning_effort" in profile and profile["model_reasoning_effort"] not in (
+                "low", "medium", "high", "xhigh", "max", "ultra",
+            ):
                 raise ValueError(f"Invalid reasoning effort in {name}")
             if "sandbox_mode" in profile or "approval_policy" in profile:
                 raise ValueError(f"Configure permissions on the parent session, not profile {name}")
@@ -258,6 +270,18 @@ def execute(changes: list[Change], layout: Layout, dry_run: bool) -> None:
             write_atomic(change.path, change.data)
 
 
+def drops_custom_pins(path: Path, previous: bytes, expected: bytes) -> bool:
+    if path.suffix != ".toml" or path.stem not in LEGACY_PINS:
+        return False
+    keys = ("model", "model_reasoning_effort")
+    new_profile = tomllib.loads(expected.decode("utf-8"))
+    if any(key in new_profile for key in keys):
+        return False
+    old_profile = tomllib.loads(previous.decode("utf-8-sig"))
+    return (any(key in old_profile for key in keys)
+            and tuple(old_profile.get(key) for key in keys) != LEGACY_PINS[path.stem])
+
+
 def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool = False,
              verify: bool = False, uninstall: bool = False) -> int:
     desired = layout.removal_targets() if uninstall else layout.desired(source)
@@ -319,6 +343,17 @@ def maintain(source: Path, layout: Layout, *, dry_run: bool = False, force: bool
             print(f"unchanged: {path}")
             if managed:
                 owned[key] = digest(expected)
+        elif (existing is not None and managed and digest(existing) == owned[key]
+              and drops_custom_pins(path, existing, expected)):
+            if force:
+                changes.append(Change(path, expected, "replace", backup=True))
+                owned[key] = digest(expected)
+            else:
+                # Relinquish ownership in both journal snapshots. Recovery must
+                # also preserve these bytes if uninstall follows an interruption.
+                del manifest["files"][key]
+                owned.pop(key)
+                issues.append(f"preserved user-pinned profile: {path}")
         elif existing is None or (managed and digest(existing) == owned[key]):
             changes.append(Change(path, expected, "create" if existing is None else "update"))
             owned[key] = digest(expected)

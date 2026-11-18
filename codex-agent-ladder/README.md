@@ -4,16 +4,16 @@ A Codex skill that routes substantial implementation, debugging, codebase resear
 
 ## Roles
 
-| Role | Model / reasoning | Purpose |
-| --- | --- | --- |
-| `ladder_scout` | `gpt-6-luna` / high | Bounded read-only investigations returning evidence. |
-| `ladder_worker` | `gpt-6.1-sol` / medium | Scoped implementation following established patterns. |
-| `ladder_deep_worker` | `gpt-6-astra` / high | Difficult debugging, design, and migrations. |
-| `ladder_verifier` | `gpt-6.1-sol` / high | Separate read-only review of an integrated result. |
+| Role | Purpose |
+| --- | --- |
+| `ladder_scout` | Bounded read-only investigations returning evidence. |
+| `ladder_worker` | Scoped implementation following established patterns. |
+| `ladder_deep_worker` | Difficult debugging, design, and migrations. |
+| `ladder_verifier` | Separate read-only review of an integrated result. |
 
-For everyday coding and PR review, consider `gpt-6.2-sol`. For difficult cross-service debugging or design decisions, consider `gpt-6.2-astra`. With a 6.2 parent, its model and effort are the starting point for a child. Adjust either when the assignment warrants it and the host supports the choice. The table lists the shipped native presets. To select different settings for an assignment, use the explicit override path in [SKILL.md](SKILL.md#spawn-a-role). [GPT-6.2 release guidance](https://learn.chatgpt.com/docs/whats-new/gpt-62-astra-sol)
+For everyday coding and PR review, consider `gpt-6.2-sol`. For difficult cross-service debugging or design decisions, consider `gpt-6.2-astra`. With a 6.2 parent, its model and effort are the starting point for a child. Adjust either when the assignment warrants it and the host supports the choice. All four roles ship with model and effort unset. You can pin either setting in a role and let the ladder choose the other per task. [Role selection](SKILL.md#spawn-a-role). [GPT-6.2 release guidance](https://learn.chatgpt.com/docs/whats-new/gpt-62-astra-sol)
 
-Consider `gpt-6.1-terra` for bounded visual reasoning, supported computer use, clear writing, and scoped code fixes, starting at medium effort when appropriate. Choose only model/effort combinations exposed by the host. Terra is an alternative for a suitable assignment, not a mandatory replacement for the existing presets. See [OpenAI's model selection guidance](https://learn.chatgpt.com/docs/model-selection).
+Consider `gpt-6.1-terra` for bounded visual reasoning, supported computer use, clear writing, and scoped code fixes, starting at medium effort when appropriate. Choose only model/effort combinations exposed by the host. See [OpenAI's model selection guidance](https://learn.chatgpt.com/docs/model-selection).
 
 ## Install
 
